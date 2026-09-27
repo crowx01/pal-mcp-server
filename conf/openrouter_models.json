@@ -103,12 +103,13 @@
       "intelligence_score": 8
     },
     {
-      "model_name": "google/gemini-3-pro-preview",
+      "model_name": "google/gemini-3.1-pro-preview",
       "aliases": [
         "pro",
         "gemini-pro",
         "gemini",
         "gemini3",
+        "google/gemini-3-pro-preview",
         "pro-openrouter"
       ],
       "context_window": 1048576,

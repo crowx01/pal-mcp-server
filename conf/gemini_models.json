@@ -26,12 +26,13 @@
   },
   "models": [
     {
-      "model_name": "gemini-3-pro-preview",
-      "friendly_name": "Gemini Pro 3.0 Preview",
+      "model_name": "gemini-3.1-pro-preview",
+      "friendly_name": "Gemini Pro 3.1 Preview",
       "aliases": [
         "pro",
         "gemini3",
-        "gemini-pro"
+        "gemini-pro",
+        "gemini-3-pro-preview"
       ],
       "intelligence_score": 18,
       "description": "Deep reasoning + thinking mode (1M context) - Complex problems, architecture, deep analysis",

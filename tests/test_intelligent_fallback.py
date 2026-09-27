@@ -48,7 +48,7 @@ class TestIntelligentFallback:
 
     @patch.dict(os.environ, {"OPENAI_API_KEY": "", "GEMINI_API_KEY": "test-gemini-key"}, clear=False)
     def test_prefers_gemini_flash_when_openai_unavailable(self):
-        """Test that gemini-2.5-flash is used when only Gemini API key is available"""
+        """Test that gemini-3.6-flash is used when only Gemini API key is available"""
         # Register only Gemini provider for this test
         from providers.gemini import GeminiModelProvider
 
@@ -81,7 +81,7 @@ class TestIntelligentFallback:
         ModelProviderRegistry.register_provider(ProviderType.GOOGLE, GeminiModelProvider)
 
         fallback_model = ModelProviderRegistry.get_preferred_fallback_model()
-        assert fallback_model == "gemini-2.5-flash"  # Default fallback
+        assert fallback_model == "gemini-3.6-flash"  # Default fallback
 
     def test_available_providers_with_keys(self):
         """Test the get_available_providers_with_keys method"""
@@ -186,7 +186,7 @@ class TestIntelligentFallback:
 
                 history, tokens = build_conversation_history(context, model_context=None)
 
-                # Should use gemini-2.5-flash when only Gemini is available
+                # Should use gemini-3.6-flash when only Gemini is available
                 mock_context_class.assert_called_once_with("gemini-3.6-flash")
 
     def test_non_auto_mode_unchanged(self):

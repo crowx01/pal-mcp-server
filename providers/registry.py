@@ -414,14 +414,15 @@ class ModelProviderRegistry:
                 caps = provider.get_capabilities(model_name)
                 rank = caps.get_effective_capability_rank() if caps else 0
                 # Guard against providers/mocks returning a non-numeric rank, which
-                # would break the max()/min() comparisons below.
-                return rank if isinstance(rank, int) else 0
+                # would break the max()/min() comparisons below. Accept int/float but
+                # reject bool (a subclass of int) so True/False can't pose as a rank.
+                return rank if isinstance(rank, (int, float)) and not isinstance(rank, bool) else 0
             except Exception:  # pragma: no cover - defensive
                 return 0
 
         # Collect one best candidate per provider (cross-provider), with its rank:
         # (model_name, rank, provider_type)
-        candidates: list[tuple[str, int, "ProviderType"]] = []
+        candidates: list[tuple[str, int, ProviderType]] = []
         first_available_model = None
         # First provider (in priority order) that expresses an explicit preference.
         # Used as the BALANCED fallback so behaviour stays upstream-compatible when
@@ -445,10 +446,14 @@ class ModelProviderRegistry:
             if candidate and priority_preferred is None:
                 priority_preferred = candidate
             if not candidate:
+                # Sort first so ties break deterministically by model name, matching
+                # the sorted() first-available fallback above (min/max are stable and
+                # would otherwise depend on allowed_models iteration order).
+                ordered = sorted(allowed_models)
                 if effective_category == ToolModelCategory.FAST_RESPONSE:
-                    candidate = min(allowed_models, key=lambda m: rank_of(provider, m))
+                    candidate = min(ordered, key=lambda m: rank_of(provider, m))
                 else:
-                    candidate = max(allowed_models, key=lambda m: rank_of(provider, m))
+                    candidate = max(ordered, key=lambda m: rank_of(provider, m))
 
             candidates.append((candidate, rank_of(provider, candidate), provider_type))
 
@@ -485,7 +490,7 @@ class ModelProviderRegistry:
 
         # Ultimate fallback if no providers have models
         logging.warning("No models available from any provider, using default fallback")
-        return "gemini-2.5-flash"
+        return "gemini-3.6-flash"
 
     @classmethod
     def get_available_providers_with_keys(cls) -> list[ProviderType]:
