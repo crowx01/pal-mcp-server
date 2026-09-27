@@ -21,16 +21,16 @@ class TestSupportedModelsAliases:
         # Test specific aliases
         assert "flash" in provider.MODEL_CAPABILITIES["gemini-3.6-flash"].aliases
         assert "pro" in provider.MODEL_CAPABILITIES["gemini-3.1-pro-preview"].aliases
-        assert "flash-2.0" in provider.MODEL_CAPABILITIES["gemini-2.0-flash"].aliases
-        assert "flash2" in provider.MODEL_CAPABILITIES["gemini-2.0-flash"].aliases
+        assert "flash-2.0" in provider.MODEL_CAPABILITIES["gemini-3.6-flash"].aliases
+        assert "flash2" in provider.MODEL_CAPABILITIES["gemini-3.6-flash"].aliases
         assert "flashlite" in provider.MODEL_CAPABILITIES["gemini-3.5-flash-lite"].aliases
         assert "flash-lite" in provider.MODEL_CAPABILITIES["gemini-3.5-flash-lite"].aliases
 
         # Test alias resolution
         assert provider._resolve_model_name("flash") == "gemini-3.6-flash"
         assert provider._resolve_model_name("pro") == "gemini-3.1-pro-preview"
-        assert provider._resolve_model_name("flash-2.0") == "gemini-2.0-flash"
-        assert provider._resolve_model_name("flash2") == "gemini-2.0-flash"
+        assert provider._resolve_model_name("flash-2.0") == "gemini-3.6-flash"
+        assert provider._resolve_model_name("flash2") == "gemini-3.6-flash"
         assert provider._resolve_model_name("flashlite") == "gemini-3.5-flash-lite"
 
         # Test case insensitive resolution
