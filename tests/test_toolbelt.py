@@ -234,3 +234,73 @@ def test_run_agentic_react(monkeypatch):
     assert "final answer" in resp.content
     assert "<tool_call>" not in resp.content
     assert "<tool_result>" not in resp.content
+
+
+# --------------------------------------------------------------------------
+# additional coverage (authored via PAL groq, verified locally)
+# --------------------------------------------------------------------------
+def _make_ping_tool():
+    return ToolSpec(
+        name="ping",
+        description="returns pong",
+        parameters={},
+        handler=lambda _a: "pong",
+    )
+
+
+def test_schemas_respect_enabled_and_blocklist():
+    belt = Toolbelt()
+    belt.register(ToolSpec(name="a", description="A tool", parameters={}, handler=lambda _a: ""))
+    belt.register(
+        ToolSpec(
+            name="b",
+            description="B tool",
+            parameters={},
+            handler=lambda _a: "",
+            provider_blocklist=("gpt",),
+        )
+    )
+    belt.enable("a")
+    belt.enable("b")
+
+    schema = belt.openai_schema(provider="gpt")
+    assert [f["function"]["name"] for f in schema] == ["a"]
+
+    react = belt.react_schema(provider="gpt")
+    assert "- a(" in react
+    assert "- b(" not in react
+
+    assert Toolbelt().react_schema(provider="any") == ""
+
+
+def test_run_agentic_native_fc_truncation(monkeypatch):
+    fake_provider = _FakeFCProvider(gen_returns=[], chat_returns=[])
+    fake_provider.chat_with_tools = lambda **_: {
+        "tool_calls": [{"id": "1", "name": "ping", "arguments": "{}"}],
+        "content": "",
+        "usage": {},
+        "finish_reason": "tool_calls",
+    }
+    belt = _belt_with_ping()
+    monkeypatch.setattr(agent_loop, "is_enabled", lambda: True)
+    monkeypatch.setattr(agent_loop, "get_toolbelt", lambda: belt)
+
+    resp = run_agentic(fake_provider, prompt="q", model_name="gpt", max_iters=2)
+    assert resp.metadata.get("toolbelt_truncated") is True
+    assert resp.metadata.get("toolbelt_mode") == "native_fc"
+
+
+def test_bash_output_truncation():
+    result = bash_adapter._run({"command": "head -c 40000 /dev/zero"})
+    assert "[truncated," in result
+    assert "bytes total]" in result
+
+
+def test_execute_writes_audit_log(tmp_path):
+    belt = Toolbelt()
+    belt._log_path = tmp_path / "tc.log"
+    belt.register(_make_ping_tool())
+    belt.enable("ping")
+    belt.execute("ping", {})
+    assert belt._log_path.is_file()
+    assert '"tool": "ping"' in belt._log_path.read_text()
