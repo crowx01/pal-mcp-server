@@ -445,6 +445,21 @@ class SimpleTool(BaseTool):
             # peer models automatically instead of surfacing to the caller.
             from providers.registry import ModelProviderRegistry
             from providers.router.fallback_chain import call_with_fallback
+            from providers.router.size_guard import check_or_reroute
+
+            # Pre-flight size guard: reroute BEFORE the round-trip if the
+            # request obviously exceeds the model's cap. Saves a 413 hop.
+            _dispatch_model = self._current_model_name
+            ok, hint = check_or_reroute(_dispatch_model, prompt)
+            if not ok and hint and hint.startswith("route:") and hint != "route:none":
+                alt = hint.split(":", 1)[1]
+                logger.warning(
+                    "size-guard: %s over cap for %s → pre-routing to %s",
+                    _dispatch_model,
+                    self.get_name(),
+                    alt,
+                )
+                _dispatch_model = alt
 
             def _invoke_model(_model: str):
                 _prov = ModelProviderRegistry.get_provider_for_model(_model) or provider
@@ -460,7 +475,7 @@ class SimpleTool(BaseTool):
             def _log_switch(prev: str, nxt: str, reason: str) -> None:
                 logger.warning("fallback: %s → %s for %s (%s)", prev, nxt, self.get_name(), reason)
 
-            model_response = call_with_fallback(_invoke_model, self._current_model_name, on_switch=_log_switch)
+            model_response = call_with_fallback(_invoke_model, _dispatch_model, on_switch=_log_switch)
 
             logger.info(f"Received response from {provider.get_provider_type().value} API for {self.get_name()}")
 
