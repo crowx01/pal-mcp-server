@@ -14,6 +14,7 @@ Design (P4b MVP):
 Everything is opt-in behind PAL_TOOLBELT=1; default off so existing
 delegate calls stay text-only until the user explicitly enables tools.
 """
+
 from __future__ import annotations
 
 import json
@@ -31,7 +32,7 @@ log = logging.getLogger(__name__)
 class ToolSpec:
     name: str
     description: str
-    parameters: dict          # JSON-schema for arguments
+    parameters: dict  # JSON-schema for arguments
     handler: Callable[[dict], str]  # returns text result
     sandbox: str = "readonly"  # "readonly" | "write"
     provider_blocklist: tuple[str, ...] = field(default_factory=tuple)
@@ -41,9 +42,7 @@ class Toolbelt:
     def __init__(self):
         self._tools: dict[str, ToolSpec] = {}
         self._enabled: set[str] = set()
-        self._log_path = Path(os.getenv(
-            "PAL_TOOL_LOG", str(Path.home() / ".cache/pal/tool-calls.log")
-        ))
+        self._log_path = Path(os.getenv("PAL_TOOL_LOG", str(Path.home() / ".cache/pal/tool-calls.log")))
 
     # ---- registration ---------------------------------------------------
     def register(self, spec: ToolSpec) -> None:
@@ -54,9 +53,7 @@ class Toolbelt:
             self._enabled.add(name)
 
     def load_config(self, path: Path | None = None) -> None:
-        p = path or Path(os.getenv(
-            "PAL_TOOLBELT_CONFIG", str(Path.home() / ".pal/toolbelt.json")
-        ))
+        p = path or Path(os.getenv("PAL_TOOLBELT_CONFIG", str(Path.home() / ".pal/toolbelt.json")))
         if not p.exists():
             log.info("toolbelt config not found at %s; leaving all tools disabled", p)
             return
@@ -71,9 +68,7 @@ class Toolbelt:
                 # apply optional sandbox / blocklist overrides
                 spec = self._tools[name]
                 spec.sandbox = tool_cfg.get("sandbox", spec.sandbox)
-                spec.provider_blocklist = tuple(
-                    tool_cfg.get("provider_blocklist", spec.provider_blocklist)
-                )
+                spec.provider_blocklist = tuple(tool_cfg.get("provider_blocklist", spec.provider_blocklist))
                 self._enabled.add(name)
 
     # ---- schema exports -------------------------------------------------
@@ -111,9 +106,7 @@ class Toolbelt:
         for t in self._tools.values():
             if t.name not in self._enabled or provider in t.provider_blocklist:
                 continue
-            entries.append(
-                f"- {t.name}({json.dumps(t.parameters.get('properties', {}))}) — {t.description}"
-            )
+            entries.append(f"- {t.name}({json.dumps(t.parameters.get('properties', {}))}) — {t.description}")
         if not entries:
             return ""
         return (
@@ -140,14 +133,20 @@ class Toolbelt:
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             with self._log_path.open("a", encoding="utf-8") as fp:
-                fp.write(json.dumps({
-                    "ts": time.time(),
-                    "model": model,
-                    "tool": tool,
-                    "args": args,
-                    "result_head": (result or "")[:400],
-                    "duration_s": round(dur, 3),
-                }, ensure_ascii=False) + "\n")
+                fp.write(
+                    json.dumps(
+                        {
+                            "ts": time.time(),
+                            "model": model,
+                            "tool": tool,
+                            "args": args,
+                            "result_head": (result or "")[:400],
+                            "duration_s": round(dur, 3),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
         except OSError as exc:
             log.debug("audit log write failed: %s", exc)
 
@@ -168,6 +167,7 @@ def get_toolbelt() -> Toolbelt:
         _INSTANCE = Toolbelt()
         # bootstrap built-in adapters
         from providers.tooling.adapters import bash, gh, filesystem, webfetch  # noqa: F401
+
         _INSTANCE.load_config()
     return _INSTANCE
 

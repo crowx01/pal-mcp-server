@@ -1,4 +1,5 @@
 """filesystem adapter — read files (allow-listed roots)."""
+
 from __future__ import annotations
 
 import os
@@ -28,17 +29,19 @@ def _read(args: dict) -> str:
     return text
 
 
-get_toolbelt().register(ToolSpec(
-    name="read_file",
-    description="Read a UTF-8 text file within PAL_FS_ROOTS. Returns first N bytes.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "path": {"type": "string"},
-            "max_bytes": {"type": "integer", "default": 20000},
+get_toolbelt().register(
+    ToolSpec(
+        name="read_file",
+        description="Read a UTF-8 text file within PAL_FS_ROOTS. Returns first N bytes.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "max_bytes": {"type": "integer", "default": 20000},
+            },
+            "required": ["path"],
         },
-        "required": ["path"],
-    },
-    handler=_read,
-    sandbox="readonly",
-))
+        handler=_read,
+        sandbox="readonly",
+    )
+)

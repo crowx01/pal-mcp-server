@@ -1,4 +1,5 @@
 """bash adapter — run a shell command, capture stdout+stderr."""
+
 from __future__ import annotations
 
 import os
@@ -6,11 +7,10 @@ import subprocess
 
 from providers.tooling.toolbelt import ToolSpec, get_toolbelt
 
-
 _ALLOWED_PREFIXES = tuple(
-    p.strip() for p in os.getenv(
-        "PAL_BASH_ALLOWLIST",
-        "ls,cat,head,tail,grep,rg,find,jq,curl,gh,git,wc,awk,sed,file,stat,which"
+    p.strip()
+    for p in os.getenv(
+        "PAL_BASH_ALLOWLIST", "ls,cat,head,tail,grep,rg,find,jq,curl,gh,git,wc,awk,sed,file,stat,which"
     ).split(",")
     if p.strip()
 )
@@ -27,7 +27,9 @@ def _run(args: dict) -> str:
     try:
         proc = subprocess.run(
             ["bash", "-c", cmd],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return f"error: timed out after {timeout}s"
@@ -37,17 +39,19 @@ def _run(args: dict) -> str:
     return out + f"\n[exit={proc.returncode}]"
 
 
-get_toolbelt().register(ToolSpec(
-    name="bash",
-    description="Run a bash command from a fixed allowlist. Returns stdout+stderr+exit.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "command": {"type": "string", "description": "bash command; only allow-listed leading binaries"},
-            "timeout_s": {"type": "integer", "default": 30},
+get_toolbelt().register(
+    ToolSpec(
+        name="bash",
+        description="Run a bash command from a fixed allowlist. Returns stdout+stderr+exit.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "bash command; only allow-listed leading binaries"},
+                "timeout_s": {"type": "integer", "default": 30},
+            },
+            "required": ["command"],
         },
-        "required": ["command"],
-    },
-    handler=_run,
-    sandbox="readonly",  # allow-list keeps this de-facto readonly
-))
+        handler=_run,
+        sandbox="readonly",  # allow-list keeps this de-facto readonly
+    )
+)

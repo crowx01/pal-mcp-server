@@ -9,6 +9,7 @@ State is process-local. Ships defaults for common caps:
     openrouter (default)  : 200_000 TPM,   0 (RPM unlimited)
     gemini (default)      : 1_000_000 TPM,   0
 """
+
 from __future__ import annotations
 
 import os
@@ -21,18 +22,18 @@ WINDOW_SECONDS = 60.0
 
 # (provider, model_prefix) -> (tpm_cap, rpm_cap). Match by prefix; 0 == unlimited.
 _CAPS: dict[tuple[str, str], tuple[int, int]] = {
-    ("custom", "gpt-oss-120b"):   (8_000, 500),   # groq via CUSTOM_API_URL
+    ("custom", "gpt-oss-120b"): (8_000, 500),  # groq via CUSTOM_API_URL
     ("custom", "openai/gpt-oss"): (8_000, 500),
-    ("openrouter", ""):           (200_000, 0),
-    ("google", ""):               (1_000_000, 0),
-    ("xai", ""):                  (200_000, 0),
+    ("openrouter", ""): (200_000, 0),
+    ("google", ""): (1_000_000, 0),
+    ("xai", ""): (200_000, 0),
 }
 
 
 @dataclass
 class _Bucket:
     tokens: deque  # (ts, count) pairs
-    reqs: deque    # ts values
+    reqs: deque  # ts values
 
 
 _BUCKETS: dict[tuple[str, str], _Bucket] = {}

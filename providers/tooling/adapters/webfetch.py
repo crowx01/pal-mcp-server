@@ -1,4 +1,5 @@
 """webfetch adapter — HTTP GET with denylist for private ranges + auth passthrough."""
+
 from __future__ import annotations
 
 import ipaddress
@@ -34,14 +35,16 @@ def _get(args: dict) -> str:
         return f"error: {exc}"
 
 
-get_toolbelt().register(ToolSpec(
-    name="web_fetch",
-    description="HTTP GET a public URL. Blocks private/link-local IPs. Returns first 20 KB.",
-    parameters={
-        "type": "object",
-        "properties": {"url": {"type": "string"}},
-        "required": ["url"],
-    },
-    handler=_get,
-    sandbox="readonly",
-))
+get_toolbelt().register(
+    ToolSpec(
+        name="web_fetch",
+        description="HTTP GET a public URL. Blocks private/link-local IPs. Returns first 20 KB.",
+        parameters={
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+        handler=_get,
+        sandbox="readonly",
+    )
+)
