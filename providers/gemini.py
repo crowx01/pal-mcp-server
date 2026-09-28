@@ -297,10 +297,13 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
 
         # P1: smart-router hooks (cache lookup, rate-limit, self-heal on 404)
         from providers.router import response_cache, rate_limit, self_heal
+
         _cache_files = kwargs.get("_cache_files") or None
         cache_key = response_cache.make_key(
-            model=resolved_model_name, tool=kwargs.get("_tool_name", ""),
-            prompt=full_prompt, files=_cache_files,
+            model=resolved_model_name,
+            tool=kwargs.get("_tool_name", ""),
+            prompt=full_prompt,
+            files=_cache_files,
             extra={"temperature": temperature, "thinking": effective_thinking_mode},
         )
         _cached = response_cache.get(cache_key)
@@ -325,26 +328,47 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
         try:
             resp = _run_once()
         except Exception as exc:
-            mig = self_heal.parse_migration(str(exc))
-            if mig and self_heal.is_enabled():
-                dead, new = mig
-                self_heal.record_migration(dead, new, provider="google")
-                logger.warning("self-heal: %s dead → retrying with %s", dead, new)
-                resolved_model_name = new  # rebind for closure
+            _err = str(exc).lower()
+            _quota_hit = (
+                "quota" in _err
+                or "429" in _err
+                or "resource_exhausted" in _err
+                or "resource exhausted" in _err
+                or "rate limit" in _err
+            )
+            _fallback_key = get_env("GEMINI_API_KEY_FALLBACK")
+            _already_rotated = getattr(self, "_key_rotated", False)
+            if _quota_hit and _fallback_key and not _already_rotated:
+                logger.warning("gemini quota hit on primary key → rotating to GEMINI_API_KEY_FALLBACK")
+                self.api_key = _fallback_key
+                self._client = None  # force re-init with new key
+                self._key_rotated = True
                 try:
                     resp = _run_once()
-                except Exception as exc2:
+                    logger.info("gemini fallback key succeeded")
+                except Exception as exc_fb:
+                    raise RuntimeError(f"Gemini API error after key rotation: {exc_fb}") from exc_fb
+            else:
+                mig = self_heal.parse_migration(str(exc))
+                if mig and self_heal.is_enabled():
+                    dead, new = mig
+                    self_heal.record_migration(dead, new, provider="google")
+                    logger.warning("self-heal: %s dead → retrying with %s", dead, new)
+                    resolved_model_name = new  # rebind for closure
+                    try:
+                        resp = _run_once()
+                    except Exception as exc2:
+                        attempts = max(attempt_counter["value"], 1)
+                        raise RuntimeError(
+                            f"Gemini API error for model {resolved_model_name} after {attempts} attempt"
+                            f"{'s' if attempts > 1 else ''}: {exc2}"
+                        ) from exc2
+                else:
                     attempts = max(attempt_counter["value"], 1)
                     raise RuntimeError(
                         f"Gemini API error for model {resolved_model_name} after {attempts} attempt"
-                        f"{'s' if attempts > 1 else ''}: {exc2}"
-                    ) from exc2
-            else:
-                attempts = max(attempt_counter["value"], 1)
-                raise RuntimeError(
-                    f"Gemini API error for model {resolved_model_name} after {attempts} attempt"
-                    f"{'s' if attempts > 1 else ''}: {exc}"
-                ) from exc
+                        f"{'s' if attempts > 1 else ''}: {exc}"
+                    ) from exc
 
         usage = getattr(resp, "usage", {}) or {}
         rate_limit.record("google", resolved_model_name, usage.get("total_tokens", _est))

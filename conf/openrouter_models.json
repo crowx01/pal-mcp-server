@@ -492,8 +492,10 @@
       "intelligence_score": 15
     },
     {
-      "model_name": "x-ai/grok-4.1-fast",
+      "model_name": "x-ai/grok-4.3",
       "aliases": [
+        "grok-4.3",
+        "grok-4.1-fast",
         "grok-4.1-fast-openrouter",
         "grok-4.1-openrouter"
       ],
@@ -506,7 +508,7 @@
       "max_image_size_mb": 20.0,
       "supports_temperature": true,
       "temperature_constraint": "range",
-      "description": "xAI's Grok 4.1 Fast Reasoning via OpenRouter (2M context) with vision and advanced reasoning",
+      "description": "xAI's Grok 4.3 via OpenRouter (2M context, replaces deprecated grok-4.1-fast) with vision and advanced reasoning",
       "intelligence_score": 15
     },
     {

@@ -1,7 +1,7 @@
 {
   "name": "cursor-agent",
   "command": "cursor-agent",
-  "additional_args": ["--headless", "-"],
+  "additional_args": ["-p", "--output-format", "text", "-f"],
   "env": {},
   "roles": {
     "default": {
