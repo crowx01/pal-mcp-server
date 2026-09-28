@@ -8,6 +8,7 @@ Phase 4: tooling/ (MCP-in-MCP proxy) + clink client coverage.
 
 from providers.router import (  # noqa: F401
     classifier,
+    fallback_chain,
     health_probe,
     rate_limit,
     refusal_memory,
@@ -17,6 +18,7 @@ from providers.router import (  # noqa: F401
 
 __all__ = [
     "classifier",
+    "fallback_chain",
     "health_probe",
     "rate_limit",
     "refusal_memory",
