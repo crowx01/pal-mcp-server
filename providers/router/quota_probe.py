@@ -23,6 +23,7 @@ Design choices:
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import os
@@ -142,9 +143,10 @@ def is_available(provider: str, max_age_s: int | None = None) -> bool:
         if rec.get("provider") != provider:
             continue
         checked = rec.get("checked_at", "")
-        # Very rough freshness: parse iso timestamp back
+        # Parse ISO-UTC back as UTC epoch (calendar.timegm, NOT time.mktime
+        # which treats input as local time and misfires under any non-UTC TZ).
         try:
-            ts = time.mktime(time.strptime(checked, "%Y-%m-%dT%H:%M:%SZ"))
+            ts = calendar.timegm(time.strptime(checked, "%Y-%m-%dT%H:%M:%SZ"))
         except (TypeError, ValueError):
             return True
         age = time.time() - ts
