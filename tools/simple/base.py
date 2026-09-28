@@ -440,15 +440,27 @@ class SimpleTool(BaseTool):
             # Resolve model capabilities for feature gating
             supports_thinking = capabilities.supports_extended_thinking
 
-            # Generate content with provider abstraction
-            model_response = provider.generate_content(
-                prompt=prompt,
-                model_name=self._current_model_name,
-                system_prompt=system_prompt,
-                temperature=temperature,
-                thinking_mode=thinking_mode if supports_thinking else None,
-                images=images if images else None,
-            )
+            # Generate content — wrap in same-category fallback chain so provider
+            # rate-limits / quota exhaustion / silent policy blocks retry against
+            # peer models automatically instead of surfacing to the caller.
+            from providers.registry import ModelProviderRegistry
+            from providers.router.fallback_chain import call_with_fallback
+
+            def _invoke_model(_model: str):
+                _prov = ModelProviderRegistry.get_provider_for_model(_model) or provider
+                return _prov.generate_content(
+                    prompt=prompt,
+                    model_name=_model,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    thinking_mode=thinking_mode if supports_thinking else None,
+                    images=images if images else None,
+                )
+
+            def _log_switch(prev: str, nxt: str, reason: str) -> None:
+                logger.warning("fallback: %s → %s for %s (%s)", prev, nxt, self.get_name(), reason)
+
+            model_response = call_with_fallback(_invoke_model, self._current_model_name, on_switch=_log_switch)
 
             logger.info(f"Received response from {provider.get_provider_type().value} API for {self.get_name()}")
 
