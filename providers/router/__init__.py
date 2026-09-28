@@ -7,9 +7,12 @@ Phase 4: tooling/ (MCP-in-MCP proxy) + clink client coverage.
 """
 
 from providers.router import (  # noqa: F401
+    bandit,
     classifier,
+    episode_store,
     fallback_chain,
     health_probe,
+    lesson_store,
     quota_probe,
     rate_limit,
     refusal_memory,
@@ -18,10 +21,16 @@ from providers.router import (  # noqa: F401
     size_guard,
 )
 
+# NOTE: `distill` is an offline CLI (python -m providers.router.distill); it is
+# intentionally NOT eagerly imported here so `-m` execution has clean semantics.
+
 __all__ = [
+    "bandit",
     "classifier",
+    "episode_store",
     "fallback_chain",
     "health_probe",
+    "lesson_store",
     "quota_probe",
     "rate_limit",
     "refusal_memory",
