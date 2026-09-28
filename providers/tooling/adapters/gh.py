@@ -49,7 +49,7 @@ def _run(args: dict) -> str:
         return "error: gh timed out after 60s"
     out = (proc.stdout or "") + (("\n[stderr]\n" + proc.stderr) if proc.stderr else "")
     if len(out) > 20_000:
-        out = out[:20_000] + f"\n... [truncated]"
+        out = out[:20_000] + "\n... [truncated]"
     return out + f"\n[exit={proc.returncode}]"
 
 
