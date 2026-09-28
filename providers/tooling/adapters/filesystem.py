@@ -29,6 +29,35 @@ def _read(args: dict) -> str:
     return text
 
 
+def _resolve_in_roots(path_str: str) -> tuple[Path | None, str]:
+    p = Path(path_str or "")
+    if not p.is_absolute():
+        p = (Path.cwd() / p).resolve()
+    else:
+        p = p.resolve()
+    if not any(str(p).startswith(str(r) + os.sep) or str(p) == str(r) for r in _roots()):
+        return None, f"error: path {p} outside PAL_FS_ROOTS"
+    return p, ""
+
+
+def _write(args: dict) -> str:
+    p, err = _resolve_in_roots(args.get("path", ""))
+    if p is None:
+        return err
+    content = args.get("content", "")
+    if not isinstance(content, str):
+        content = str(content)
+    overwrite = bool(args.get("overwrite", False))
+    if p.exists() and not overwrite:
+        return f"error: {p} exists; pass overwrite=true to replace it"
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        return f"error: {exc}"
+    return f"wrote {len(content)} bytes to {p}"
+
+
 get_toolbelt().register(
     ToolSpec(
         name="read_file",
@@ -43,5 +72,26 @@ get_toolbelt().register(
         },
         handler=_read,
         sandbox="readonly",
+    )
+)
+
+get_toolbelt().register(
+    ToolSpec(
+        name="write_file",
+        description=(
+            "Create or overwrite a UTF-8 text file within PAL_FS_ROOTS (defaults to the "
+            "current directory). Use this to CREATE files. Won't overwrite unless overwrite=true."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "file path, relative to the working dir"},
+                "content": {"type": "string", "description": "file contents (may be empty)"},
+                "overwrite": {"type": "boolean", "default": False},
+            },
+            "required": ["path"],
+        },
+        handler=_write,
+        sandbox="write",
     )
 )

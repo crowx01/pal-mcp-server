@@ -7,22 +7,31 @@ import subprocess
 
 from providers.tooling.toolbelt import ToolSpec, get_toolbelt
 
-_ALLOWED_PREFIXES = tuple(
-    p.strip()
-    for p in os.getenv(
-        "PAL_BASH_ALLOWLIST", "ls,cat,head,tail,grep,rg,find,jq,curl,gh,git,wc,awk,sed,file,stat,which"
-    ).split(",")
-    if p.strip()
-)
+_DEFAULT_ALLOW = "ls,cat,head,tail,grep,rg,find,jq,curl,gh,git,wc,awk,sed,file,stat,which"
+
+
+def _allowlist() -> tuple[str, ...]:
+    # read at call-time so the allowlist / unrestricted flag can change per run
+    raw = os.getenv("PAL_BASH_ALLOWLIST", _DEFAULT_ALLOW)
+    return tuple(p.strip() for p in raw.split(",") if p.strip())
+
+
+def _unrestricted() -> bool:
+    return os.getenv("PAL_BASH_UNRESTRICTED", "0") in ("1", "true", "yes")
 
 
 def _run(args: dict) -> str:
     cmd = (args.get("command") or "").strip()
     if not cmd:
         return "error: 'command' is required"
-    first = cmd.split(None, 1)[0]
-    if _ALLOWED_PREFIXES and first not in _ALLOWED_PREFIXES:
-        return f"error: '{first}' not in PAL_BASH_ALLOWLIST"
+    if not _unrestricted():
+        first = cmd.split(None, 1)[0]
+        allow = _allowlist()
+        if allow and first not in allow:
+            return (
+                f"error: '{first}' is not in the read-only allowlist. "
+                "This is read-only /tools mode; use /tools:full to run arbitrary commands."
+            )
     timeout = int(args.get("timeout_s", 30))
     try:
         proc = subprocess.run(
@@ -42,7 +51,11 @@ def _run(args: dict) -> str:
 get_toolbelt().register(
     ToolSpec(
         name="bash",
-        description="Run a bash command from a fixed allowlist. Returns stdout+stderr+exit.",
+        description=(
+            "Run a bash shell command; returns stdout+stderr+exit code. In read-only mode "
+            "only allow-listed binaries run; in full mode any command runs (nmap, nuclei, "
+            "ffuf, etc.). Launch GUI/long-running apps detached: setsid <cmd> >/dev/null 2>&1 &"
+        ),
         parameters={
             "type": "object",
             "properties": {
