@@ -166,7 +166,7 @@ def get_toolbelt() -> Toolbelt:
     if _INSTANCE is None:
         _INSTANCE = Toolbelt()
         # bootstrap built-in adapters
-        from providers.tooling.adapters import bash, gh, filesystem, webfetch, clink  # noqa: F401
+        from providers.tooling.adapters import bash, clink, filesystem, gh, webfetch  # noqa: F401
 
         _INSTANCE.load_config()
     return _INSTANCE

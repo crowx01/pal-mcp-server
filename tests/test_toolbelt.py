@@ -16,7 +16,7 @@ from providers.shared.provider_type import ProviderType
 from providers.tooling import agent_loop
 from providers.tooling.adapters import bash as bash_adapter
 from providers.tooling.agent_loop import run_agentic
-from providers.tooling.toolbelt import ToolSpec, Toolbelt, is_enabled
+from providers.tooling.toolbelt import Toolbelt, ToolSpec, is_enabled
 
 
 def _belt_with_ping() -> Toolbelt:

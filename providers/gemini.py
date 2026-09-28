@@ -296,7 +296,7 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
             )
 
         # P1: smart-router hooks (cache lookup, rate-limit, self-heal on 404)
-        from providers.router import response_cache, rate_limit, self_heal
+        from providers.router import rate_limit, response_cache, self_heal
 
         _cache_files = kwargs.get("_cache_files") or None
         cache_key = response_cache.make_key(

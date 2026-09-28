@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-import urllib.parse
 
 from providers.tooling.toolbelt import ToolSpec, get_toolbelt
 
