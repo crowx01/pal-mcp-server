@@ -99,6 +99,68 @@ def record(provider: str, model: str, tokens_used: int) -> None:
         b.reqs.append(now)
 
 
+# ---------------------------------------------------------------------------
+# Retry-After honor: parse the Retry-After header (seconds or HTTP-date) and
+# common body patterns like "Please try again in 6.2s" / "retry in 12000ms".
+# Cap the honored wait at MAX_HONOR_S so a pathological Retry-After: 3600
+# does not block the caller forever — beyond that we fall through and let the
+# fallback_chain switch model.
+# ---------------------------------------------------------------------------
+MAX_HONOR_S = int(os.getenv("PAL_RATE_LIMIT_MAX_HONOR_S", "15"))
+
+
+def parse_retry_after(headers: dict | None, body: str | None) -> int | None:
+    """Return an integer seconds-to-wait if the response tells us how long,
+    else None. Honors the standard Retry-After header (delta-seconds only —
+    HTTP-date parsing is intentionally not implemented; providers don't use
+    it in practice for rate-limit errors) and scans the body for common
+    provider phrasings."""
+    # Header: canonical or lowercase key
+    if headers:
+        for key in ("Retry-After", "retry-after", "RETRY-AFTER"):
+            val = headers.get(key)
+            if val is None:
+                continue
+            try:
+                secs = int(float(str(val).strip()))
+                if secs >= 0:
+                    return secs
+            except (TypeError, ValueError):
+                continue
+
+    if not body:
+        return None
+    import re
+
+    text = body.lower()
+    # "please try again in 6.2s" / "retry in 6.2 seconds"
+    m = re.search(r"(?:retry|try again)[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)\s*s(?:ec(?:ond)?s?)?\b", text)
+    if m:
+        return max(0, int(float(m.group(1))))
+    # "retry in 12000ms" / "wait 500 ms"
+    m = re.search(r"(?:retry|wait)[^0-9]{0,20}([0-9]+)\s*ms\b", text)
+    if m:
+        return max(0, int(m.group(1)) // 1000)
+    # groq-style "Please retry in 6.168596011s"
+    m = re.search(r"please retry in\s+([0-9]+(?:\.[0-9]+)?)s", text)
+    if m:
+        return max(0, int(float(m.group(1))))
+    return None
+
+
+def honor_retry_after(headers: dict | None, body: str | None, sleep=time.sleep) -> int:
+    """If a Retry-After hint is present and fits under MAX_HONOR_S, sleep for
+    that long and return the seconds slept. Otherwise return 0 (caller should
+    fall through to the fallback chain instead of blocking further)."""
+    hint = parse_retry_after(headers, body)
+    if hint is None:
+        return 0
+    wait = min(hint, MAX_HONOR_S)
+    if wait > 0:
+        sleep(wait)
+    return wait
+
+
 def snapshot() -> dict:
     """Diagnostic snapshot for `pal --diag`."""
     now = time.monotonic()
