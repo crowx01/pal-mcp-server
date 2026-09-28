@@ -813,7 +813,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
         if model_name.lower() == "auto":
             # P2: prompt-content classifier (falls through to tool category on no match)
             try:
-                from providers.router import classifier, refusal_memory
+                from providers.router import bandit, classifier, refusal_memory
 
                 _prompt_for_cls = arguments.get("prompt") or arguments.get("step") or ""
                 _files_for_cls = arguments.get("absolute_file_paths") or None
@@ -823,8 +823,11 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
                 if pal_cat and pal_cat in classifier.CATEGORY_PREFERENCES:
                     logger.info(f"PAL classifier picked category '{pal_cat}' for {name}")
                     candidates = list(classifier.CATEGORY_PREFERENCES[pal_cat])
-                # Filter out session-blacklisted (model, category) pairs.
                 cat_tag = pal_cat or tool_category.value
+                # Phase-1 bandit: reorder by observed success (reversible, in-session;
+                # never drops a candidate -> exploration floor preserved).
+                candidates = bandit.reorder(cat_tag, candidates)
+                # Filter out session-blacklisted (model, category) pairs.
                 candidates = [c for c in candidates if not refusal_memory.is_blacklisted(c, cat_tag)]
                 resolved_model = None
                 for cand in candidates:
@@ -888,27 +891,56 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
                 raise ToolExecutionError(ToolOutput(**file_size_check).model_dump_json())
 
         # Execute tool with pre-resolved model context
+        _pal_t0 = time.time()
         try:
             result = await tool.execute(arguments)
         except Exception as _exc:
             # P2: record refusal on error so the router skips this pair next time
             try:
-                from providers.router import refusal_memory
+                from providers.router import episode_store, refusal_memory
 
+                _pal_cat = arguments.get("_pal_category", "")
+                _lat_ms = int((time.time() - _pal_t0) * 1000)
                 tag = refusal_memory.classify(str(_exc))
                 if tag:
-                    refusal_memory.record(model_name, arguments.get("_pal_category", ""), tag)
+                    refusal_memory.record(model_name, _pal_cat, tag)
+                # Phase-1 learning substrate: persist the failure episode.
+                _klass = refusal_memory.classify_class(tag or str(_exc))
+                episode_store.record(
+                    model_name,
+                    _pal_cat,
+                    "refusal" if (tag or "").startswith("refusal:") else "error",
+                    latency_ms=_lat_ms,
+                    prompt=arguments.get("prompt") or arguments.get("step"),
+                    err_class=_klass,
+                    tool=name,
+                    reason=tag or str(_exc),
+                )
             except Exception:
                 pass
             raise
         # P2: sniff result payload for silent refusals (200-with-refusal-body)
         try:
-            from providers.router import refusal_memory
+            from providers.router import episode_store, refusal_memory
 
+            _pal_cat = arguments.get("_pal_category", "")
+            _lat_ms = int((time.time() - _pal_t0) * 1000)
             _txt = "".join(getattr(x, "text", "") or "" for x in (result or []))
             tag = refusal_memory.classify(_txt)
-            if tag and tag.startswith("refusal:"):
-                refusal_memory.record(model_name, arguments.get("_pal_category", ""), tag)
+            _is_refusal = bool(tag and tag.startswith("refusal:"))
+            if _is_refusal:
+                refusal_memory.record(model_name, _pal_cat, tag)
+            # Phase-1 learning substrate: persist the outcome episode.
+            episode_store.record(
+                model_name,
+                _pal_cat,
+                "refusal" if _is_refusal else "success",
+                latency_ms=_lat_ms,
+                prompt=arguments.get("prompt") or arguments.get("step"),
+                err_class=refusal_memory.classify_class(tag) if _is_refusal else None,
+                tool=name,
+                reason=tag if _is_refusal else None,
+            )
         except Exception:
             pass
         logger.info(f"Tool '{name}' execution completed")

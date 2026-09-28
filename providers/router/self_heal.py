@@ -26,7 +26,15 @@ _MIGRATION_RE = re.compile(
 )
 
 _ALIAS_MAP: dict[str, str] = {}
+# provisional (dead, new) -> times this exact hint has been seen. A migration
+# only becomes a permanent alias after MIN_HINTS sightings, so a single flaky
+# 404-with-migration-text can't permanently rewrite routing.
+_PROVISIONAL: dict[tuple[str, str], int] = {}
 _LOCK = threading.Lock()
+
+# how many identical migration hints before we commit a permanent alias.
+# Set to 1 to restore the old commit-on-first-hint behaviour.
+MIN_HINTS = int(os.getenv("PAL_SELF_HEAL_MIN_HINTS", "2"))
 
 DRIFT_LOG = Path(os.getenv("PAL_DRIFT_LOG", str(Path.home() / ".cache/pal/registry-drift.log")))
 
@@ -41,15 +49,30 @@ def parse_migration(err_text: str) -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-def record_migration(dead: str, new: str, provider: str = "unknown") -> None:
+def record_migration(dead: str, new: str, provider: str = "unknown") -> bool:
+    """Note a migration hint. Commit a *permanent* alias only once the same
+    (dead, new) hint has been seen ``MIN_HINTS`` times.
+
+    Returns True if the alias is now committed (permanent), False while still
+    on probation. The caller may retry with ``new`` for the current request
+    regardless -- probation only gates persistence, not the one-shot retry.
+    """
+    key = (dead, new)
     with _LOCK:
+        seen = _PROVISIONAL.get(key, 0) + 1
+        _PROVISIONAL[key] = seen
+        if seen < MIN_HINTS:
+            log.info("self-heal: %s -> %s on probation (%d/%d)", dead, new, seen, MIN_HINTS)
+            return False
         _ALIAS_MAP[dead] = new
+        _PROVISIONAL.pop(key, None)
     try:
         DRIFT_LOG.parent.mkdir(parents=True, exist_ok=True)
         with DRIFT_LOG.open("a", encoding="utf-8") as fp:
             fp.write(f"{datetime.now(timezone.utc).isoformat()}\t{provider}\t" f"{dead}\t->\t{new}\n")
     except OSError as exc:
         log.warning("could not write drift log %s: %s", DRIFT_LOG, exc)
+    return True
 
 
 def resolve(model_id: str) -> str:
