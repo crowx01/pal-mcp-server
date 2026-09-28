@@ -5,6 +5,7 @@ Phase 2: refusal_memory, classifier.
 Phase 3: hybrid (speculative-draft + confidence envelope).
 Phase 4: tooling/ (MCP-in-MCP proxy) + clink client coverage.
 """
+
 from providers.router import (  # noqa: F401
     classifier,
     health_probe,
@@ -15,6 +16,10 @@ from providers.router import (  # noqa: F401
 )
 
 __all__ = [
-    "classifier", "health_probe", "rate_limit", "refusal_memory",
-    "response_cache", "self_heal",
+    "classifier",
+    "health_probe",
+    "rate_limit",
+    "refusal_memory",
+    "response_cache",
+    "self_heal",
 ]

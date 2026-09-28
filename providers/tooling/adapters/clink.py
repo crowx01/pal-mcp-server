@@ -77,9 +77,7 @@ def _run(args: dict[str, Any]) -> str:
         agent = create_agent(client)
 
         async def _go():
-            return await agent.run(
-                role=role_cfg, prompt=prompt, system_prompt=None, files=[], images=[]
-            )
+            return await agent.run(role=role_cfg, prompt=prompt, system_prompt=None, files=[], images=[])
 
         result = _run_coro(_go())
         text = getattr(result.parsed, "content", None) or getattr(result, "stdout", "") or ""

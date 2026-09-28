@@ -4,6 +4,7 @@ Records (model, task_category) pairs that returned a refusal / 4xx / 5xx /
 safety-block. `is_blacklisted()` lets the router skip those pairs for the
 next N routing decisions.  Process-lifetime state only; a restart wipes.
 """
+
 from __future__ import annotations
 
 import logging
@@ -34,11 +35,31 @@ def is_enabled() -> bool:
 
 
 REFUSAL_MARKERS = (
-    "refuse", "cannot help", "cannot assist", "unable to", "policy",
-    "safety", "unsafe", "harmful", "not able to comply",
+    "refuse",
+    "cannot help",
+    "cannot assist",
+    "unable to",
+    "policy",
+    "safety",
+    "unsafe",
+    "harmful",
+    "not able to comply",
 )
-STATUS_TRIGGERS = ("400", "401", "403", "422", "429", "500", "502", "503", "504",
-                   "NOT_FOUND", "PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "BLOCKED")
+STATUS_TRIGGERS = (
+    "400",
+    "401",
+    "403",
+    "422",
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "NOT_FOUND",
+    "PERMISSION_DENIED",
+    "RESOURCE_EXHAUSTED",
+    "BLOCKED",
+)
 
 
 def classify(err_or_response: str) -> str | None:
@@ -62,9 +83,7 @@ def record(model: str, category: str, reason: str) -> None:
     now = time.time()
     with _LOCK:
         cur = _MEM.get(key)
-        _MEM[key] = _Entry(
-            ts=now, count=(cur.count + 1 if cur else 1), reason=reason[:120]
-        )
+        _MEM[key] = _Entry(ts=now, count=(cur.count + 1 if cur else 1), reason=reason[:120])
     log.info("refusal recorded: %s / %s (%s)", model, category, reason[:80])
 
 
@@ -93,7 +112,10 @@ def snapshot() -> dict:
     with _LOCK:
         return {
             f"{m}/{c}": {
-                "age_s": int(now - e.ts), "count": e.count, "reason": e.reason,
+                "age_s": int(now - e.ts),
+                "count": e.count,
+                "reason": e.reason,
             }
-            for (m, c), e in _MEM.items() if now - e.ts <= TTL
+            for (m, c), e in _MEM.items()
+            if now - e.ts <= TTL
         }

@@ -13,6 +13,7 @@ Two features:
 Feature is opt-in per-tool via `hybrid=True` in the tool schema OR via
 `PAL_HYBRID=1`. Off by default so we don't break existing tool contracts.
 """
+
 from __future__ import annotations
 
 import json
@@ -66,8 +67,7 @@ def extract_envelope(text: str) -> Envelope | None:
         return None
     claims = data.get("claims") or []
     order = {"low": 0, "medium": 1, "high": 2}
-    min_c = min((order.get((c.get("confidence") or "").lower(), 3) for c in claims),
-                default=3)
+    min_c = min((order.get((c.get("confidence") or "").lower(), 3) for c in claims), default=3)
     ranks = {0: "low", 1: "medium", 2: "high", 3: "unknown"}
     return Envelope(claims=claims, min_confidence=ranks[min_c])
 

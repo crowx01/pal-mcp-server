@@ -3,6 +3,7 @@
 Parses  <tool_call>{"name": "...", "args": {...}}</tool_call>  blocks from a
 model response and returns (tool_name, args) pairs.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,4 +27,4 @@ def extract_calls(text: str) -> list[tuple[str, dict]]:
 
 
 def format_result(name: str, result: str) -> str:
-    return f"<tool_result name=\"{name}\">{result}</tool_result>"
+    return f'<tool_result name="{name}">{result}</tool_result>'

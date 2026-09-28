@@ -814,20 +814,18 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
             # P2: prompt-content classifier (falls through to tool category on no match)
             try:
                 from providers.router import classifier, refusal_memory
+
                 _prompt_for_cls = arguments.get("prompt") or arguments.get("step") or ""
                 _files_for_cls = arguments.get("absolute_file_paths") or None
                 tool_category = tool.get_model_category()
-                pal_cat = classifier.classify(
-                    _prompt_for_cls, _files_for_cls, tool_default=""
-                )
+                pal_cat = classifier.classify(_prompt_for_cls, _files_for_cls, tool_default="")
                 candidates: list[str] = []
                 if pal_cat and pal_cat in classifier.CATEGORY_PREFERENCES:
                     logger.info(f"PAL classifier picked category '{pal_cat}' for {name}")
                     candidates = list(classifier.CATEGORY_PREFERENCES[pal_cat])
                 # Filter out session-blacklisted (model, category) pairs.
                 cat_tag = pal_cat or tool_category.value
-                candidates = [c for c in candidates
-                              if not refusal_memory.is_blacklisted(c, cat_tag)]
+                candidates = [c for c in candidates if not refusal_memory.is_blacklisted(c, cat_tag)]
                 resolved_model = None
                 for cand in candidates:
                     if ModelProviderRegistry.get_provider_for_model(cand):
@@ -896,23 +894,21 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
             # P2: record refusal on error so the router skips this pair next time
             try:
                 from providers.router import refusal_memory
+
                 tag = refusal_memory.classify(str(_exc))
                 if tag:
-                    refusal_memory.record(
-                        model_name, arguments.get("_pal_category", ""), tag
-                    )
+                    refusal_memory.record(model_name, arguments.get("_pal_category", ""), tag)
             except Exception:
                 pass
             raise
         # P2: sniff result payload for silent refusals (200-with-refusal-body)
         try:
             from providers.router import refusal_memory
+
             _txt = "".join(getattr(x, "text", "") or "" for x in (result or []))
             tag = refusal_memory.classify(_txt)
             if tag and tag.startswith("refusal:"):
-                refusal_memory.record(
-                    model_name, arguments.get("_pal_category", ""), tag
-                )
+                refusal_memory.record(model_name, arguments.get("_pal_category", ""), tag)
         except Exception:
             pass
         logger.info(f"Tool '{name}' execution completed")

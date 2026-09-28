@@ -11,6 +11,7 @@ Signals (highest wins):
     structured_extract      "return json", "schema", "extract fields"
     long_form_prose         "write a report", "post-mortem", "release notes"
 """
+
 from __future__ import annotations
 
 import os
@@ -28,8 +29,7 @@ _SEC_RE = re.compile(
 )
 
 _STRUCT_RE = re.compile(
-    r"\b(return\s+json|json\s+schema|extract\s+fields|parse\s+into|"
-    r"as\s+a\s+json|structured\s+output|schema:)",
+    r"\b(return\s+json|json\s+schema|extract\s+fields|parse\s+into|" r"as\s+a\s+json|structured\s+output|schema:)",
     re.IGNORECASE,
 )
 
@@ -56,8 +56,7 @@ def _files_byte_total(paths: list[str] | None) -> int:
     return total
 
 
-def classify(prompt: str, files: list[str] | None = None,
-             tool_default: str = "") -> str:
+def classify(prompt: str, files: list[str] | None = None, tool_default: str = "") -> str:
     """Return a category string. Falls back to `tool_default` on no match."""
     if not is_enabled():
         return tool_default
@@ -76,12 +75,8 @@ def classify(prompt: str, files: list[str] | None = None,
 # Preferred model per PAL classifier category. Order is intent; the router
 # picks the first entry available with a keyed provider (and not blacklisted).
 CATEGORY_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "security_permissive":  ("grok-4-fast", "grok", "openrouter/x-ai/grok-4-fast",
-                             "or-free", "gemini-3-pro-preview"),
-    "long_context_bulk":    ("nvidia/nemotron-nano-9b-v2", "or-free",
-                             "gemini-3-pro-preview"),
-    "structured_extract":   ("gemini-3.6-flash", "flash", "gpt-oss-120b",
-                             "or-free"),
-    "long_form_prose":      ("gpt-oss-120b", "openai/gpt-oss-120b",
-                             "gemini-3-pro-preview"),
+    "security_permissive": ("grok-4-fast", "grok", "openrouter/x-ai/grok-4-fast", "or-free", "gemini-3-pro-preview"),
+    "long_context_bulk": ("nvidia/nemotron-nano-9b-v2", "or-free", "gemini-3-pro-preview"),
+    "structured_extract": ("gemini-3.6-flash", "flash", "gpt-oss-120b", "or-free"),
+    "long_form_prose": ("gpt-oss-120b", "openai/gpt-oss-120b", "gemini-3-pro-preview"),
 }

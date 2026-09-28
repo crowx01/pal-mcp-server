@@ -8,6 +8,7 @@ We parse the successor id, retry once with it, and update an in-process
 alias map so subsequent calls skip the failed hop. Migrations are appended
 to REGISTRY_DRIFT_LOG for user review.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,8 +21,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 _MIGRATION_RE = re.compile(
-    r"models?/([A-Za-z0-9._-]+)\s+is\s+no\s+longer\s+available.*?"
-    r"use\s+models?/([A-Za-z0-9._-]+)",
+    r"models?/([A-Za-z0-9._-]+)\s+is\s+no\s+longer\s+available.*?" r"use\s+models?/([A-Za-z0-9._-]+)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -47,10 +47,7 @@ def record_migration(dead: str, new: str, provider: str = "unknown") -> None:
     try:
         DRIFT_LOG.parent.mkdir(parents=True, exist_ok=True)
         with DRIFT_LOG.open("a", encoding="utf-8") as fp:
-            fp.write(
-                f"{datetime.now(timezone.utc).isoformat()}\t{provider}\t"
-                f"{dead}\t->\t{new}\n"
-            )
+            fp.write(f"{datetime.now(timezone.utc).isoformat()}\t{provider}\t" f"{dead}\t->\t{new}\n")
     except OSError as exc:
         log.warning("could not write drift log %s: %s", DRIFT_LOG, exc)
 

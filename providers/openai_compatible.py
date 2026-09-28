@@ -715,7 +715,7 @@ class OpenAICompatibleProvider(ModelProvider):
             response = self.client.chat.completions.create(**params)
             msg = response.choices[0].message
             tool_calls = []
-            for tc in (getattr(msg, "tool_calls", None) or []):
+            for tc in getattr(msg, "tool_calls", None) or []:
                 fn = getattr(tc, "function", None)
                 if fn is None:
                     continue

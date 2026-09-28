@@ -7,6 +7,7 @@ is currently returning 4xx/5xx on its model-listing endpoint.
 Non-blocking on error; a probe failure only removes the provider from
 'auto' for this process, not from explicit-model calls.
 """
+
 from __future__ import annotations
 
 import logging
@@ -58,8 +59,7 @@ def run_probe(probes: dict[str, Callable[[], None]]) -> None:
             mark(name, False, str(exc)[:200])
             log.warning("health probe failed for %s: %s", name, exc)
 
-    threads = [threading.Thread(target=_one, args=(n, f), daemon=True)
-               for n, f in probes.items()]
+    threads = [threading.Thread(target=_one, args=(n, f), daemon=True) for n, f in probes.items()]
     for t in threads:
         t.start()
     for t in threads:

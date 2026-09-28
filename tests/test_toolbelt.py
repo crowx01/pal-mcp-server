@@ -4,6 +4,7 @@ Covers the enable gate, registry/config semantics, the real bash allowlist,
 and all three run_agentic paths (disabled passthrough, native function-calling,
 ReAct text-protocol) using minimal fake providers.
 """
+
 from __future__ import annotations
 
 import json
@@ -78,11 +79,7 @@ def test_load_config_enables_only_configured(tmp_path):
     b.register(ToolSpec("keep", "k", {"type": "object", "properties": {}}, lambda _a: "k"))
     b.register(ToolSpec("skip", "s", {"type": "object", "properties": {}}, lambda _a: "s"))
     cfg = tmp_path / "toolbelt.json"
-    cfg.write_text(
-        json.dumps(
-            {"tools": [{"name": "keep", "enabled": True}, {"name": "skip", "enabled": False}]}
-        )
-    )
+    cfg.write_text(json.dumps({"tools": [{"name": "keep", "enabled": True}, {"name": "skip", "enabled": False}]}))
     b.load_config(cfg)
     assert b.snapshot()["enabled"] == ["keep"]
 

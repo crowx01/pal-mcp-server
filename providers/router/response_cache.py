@@ -6,6 +6,7 @@ TTL default 3600s; opt-out with PAL_CACHE=0 or PAL_CACHE_TTL=0.
 
 In-memory + optional on-disk mirror at ~/.cache/pal/responses/.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -50,8 +51,7 @@ def _file_fingerprint(paths: list[str] | None) -> list[tuple[str, int, int]]:
     return out
 
 
-def make_key(model: str, tool: str, prompt: str, files: list[str] | None = None,
-             extra: dict | None = None) -> str:
+def make_key(model: str, tool: str, prompt: str, files: list[str] | None = None, extra: dict | None = None) -> str:
     payload = {
         "model": model,
         "tool": tool,
