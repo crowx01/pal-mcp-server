@@ -14,6 +14,7 @@ from providers.router import (  # noqa: F401
     refusal_memory,
     response_cache,
     self_heal,
+    size_guard,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "refusal_memory",
     "response_cache",
     "self_heal",
+    "size_guard",
 ]
