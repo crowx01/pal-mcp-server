@@ -257,3 +257,37 @@ def pick(role: str, task: str = "", is_available: Callable[[str], bool] | None =
     fail over across; see chat_repl._tools_loop_pool)."""
     pool = select_pool(role, task, is_available=is_available)
     return pool[0] if pool else None
+
+
+# --- Tool transport resolution (universal tool execution) -------------------
+# Which wire format a model uses to emit tool calls:
+#   "text"         -> ReAct text tags <tool_call>{...}</tool_call> (qwen/hermes)
+#   "openai_tools" -> structured function-calling (gpt-oss, gpt-5, o3, mistral, grok)
+#   "gemini_tools" -> Gemini functionDeclarations (handled by the gemini provider)
+_TRANSPORT_KNOWN = (
+    ("gemini", "gemini_tools"),
+)
+
+
+def tool_transport_for(model: str) -> str:
+    """Resolve the tool-call transport for a model.
+
+    Every model is made execution-capable: OpenAI-compatible providers (Groq,
+    OpenRouter, OpenAI, xAI) use structured function-calling ("openai_tools"),
+    Gemini uses its function-declarations path ("gemini_tools"). "text" is only
+    used when explicitly forced via PAL_TOOLS_TRANSPORTS, for a model whose
+    endpoint cannot do structured tool calls.
+
+    Order: PAL_TOOLS_TRANSPORTS override ("model=transport,..."), then the known
+    substring map, else "openai_tools".
+    """
+    m = (model or "").lower()
+    for pair in _env_list("PAL_TOOLS_TRANSPORTS"):
+        if "=" in pair:
+            name, transport = pair.split("=", 1)
+            if name.strip().lower() in m:
+                return transport.strip()
+    for needle, transport in _TRANSPORT_KNOWN:
+        if needle in m:
+            return transport
+    return "openai_tools"

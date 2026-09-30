@@ -2,6 +2,7 @@
 
 import copy
 import ipaddress
+import json
 import logging
 from typing import Optional
 from urllib.parse import urlparse
@@ -621,6 +622,15 @@ class OpenAICompatibleProvider(ModelProvider):
                     continue  # Skip unsupported parameters for reasoning models
                 completion_params[key] = value
 
+        # Structured function-calling: when a caller passes a `tools` schema
+        # (OpenAI/Groq/OpenRouter function-calling), forward it so models that
+        # emit calls through the structured channel (gpt-oss, gpt-5, o3, ...)
+        # can actually invoke tools. Text-tag models simply ignore it.
+        _tools_schema = kwargs.get("tools")
+        if _tools_schema:
+            completion_params["tools"] = _tools_schema
+            completion_params["tool_choice"] = kwargs.get("tool_choice", "auto")
+
         # Check if this model needs the Responses API endpoint
         # Prefer capability metadata; fall back to static map when capabilities unavailable
         use_responses_api = False
@@ -680,8 +690,23 @@ class OpenAICompatibleProvider(ModelProvider):
             attempt_counter["value"] += 1
             response = self.client.chat.completions.create(**completion_params)
 
-            content = response.choices[0].message.content
+            _msg = response.choices[0].message
+            content = _msg.content or ""
             usage = self._extract_usage(response)
+
+            _tool_calls = []
+            _raw_tc = getattr(_msg, "tool_calls", None)
+            if isinstance(_raw_tc, list):
+                for _tc in _raw_tc:
+                    try:
+                        _fn = _tc.function
+                        _args = _fn.arguments
+                        _args = json.loads(_args) if isinstance(_args, str) else (_args or {})
+                    except Exception:
+                        _args = {}
+                    _tool_calls.append(
+                        {"id": getattr(_tc, "id", ""), "name": getattr(_fn, "name", ""), "arguments": _args}
+                    )
 
             return ModelResponse(
                 content=content,
@@ -694,6 +719,7 @@ class OpenAICompatibleProvider(ModelProvider):
                     "model": response.model,
                     "id": response.id,
                     "created": response.created,
+                    "tool_calls": _tool_calls,
                 },
             )
 

@@ -28,6 +28,7 @@ def generate(
     category: str = "",
     tool: str = "repl",
     max_output_tokens: int | None = None,
+    tools: list | None = None,
 ):
     """Resolve a provider for ``model``, reroute/fall back as needed, and
     record the outcome (success/refusal/error) to episode_store + refusal_memory.
@@ -64,7 +65,12 @@ def generate(
         for _ in range(max(1, len(_keys))):
             try:
                 _resp = prov.generate_content(
-                    prompt, _model, system, temperature, max_output_tokens=max_output_tokens
+                    prompt,
+                    _model,
+                    system,
+                    temperature,
+                    max_output_tokens=max_output_tokens,
+                    tools=tools,
                 )
                 if _name and getattr(prov, "api_key", None):
                     key_pool.mark_ok(_name, prov.api_key)

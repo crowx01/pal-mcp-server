@@ -267,6 +267,14 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     if prov is None:
         return (f"__ERROR__no provider for {model}", [])
     system = _maybe_security(task, (_TOOLS_SYS_FULL if full else _TOOLS_SYS) + schema)
+    # Universal tool transport: gpt-oss/gpt-5/o3/... emit calls through the
+    # structured function-calling channel, not text tags, so pass them an
+    # openai tools schema and read structured tool_calls back. Text-tag models
+    # (qwen/hermes) and gemini keep the historical ReAct text path.
+    from providers.router.tools_pool import tool_transport_for
+
+    _transport = tool_transport_for(model) if os.getenv("PAL_TOOLS_TRANSPORT", "auto") != "text" else "text"
+    _oai_tools = tb.openai_schema() if _transport == "openai_tools" else None
     # keep each request under the provider's input-token cap (Groq ITPM is small);
     # chars/4 ~= tokens, so 16000 chars ~= 4k tokens, safely under a 7k limit.
     budget = int(os.getenv("PAL_TOOLS_CTX_CHARS", "16000"))
@@ -294,12 +302,17 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                     category="tools",
                     tool="tools",
                     max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+                    tools=_oai_tools,
                 )
                 text = getattr(resp, "content", "") or ""
             except Exception as exc:
                 return (f"__ERROR__{type(exc).__name__}: {str(exc)[:200]}", transcript)
             last = text
-            calls = react.extract_calls(text)
+            # structured function-calls first (gpt-oss etc.), then text tags
+            _struct = (getattr(resp, "metadata", {}) or {}).get("tool_calls") or []
+            calls = [(c.get("name"), c.get("arguments") or {}) for c in _struct if c.get("name")]
+            if not calls:
+                calls = react.extract_calls(text)
             if not calls:
                 return (_TOOL_TAGS.sub("", text).strip() or "(no answer)", transcript)
             results = []

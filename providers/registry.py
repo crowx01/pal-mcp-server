@@ -357,7 +357,10 @@ class ModelProviderRegistry:
 
                 if key_pool.is_enabled():
                     _name = key_pool.name_for_type(getattr(provider_type, "value", str(provider_type)))
-                    if _name:
+                    # Only let the pool take over when the configured env key is
+                    # genuinely one of the pooled keys (so test/other env keys are
+                    # never silently replaced).
+                    if _name and env_key in key_pool.keys_for(_name):
                         _k = key_pool.current(_name)
                         if _k:
                             return _k
