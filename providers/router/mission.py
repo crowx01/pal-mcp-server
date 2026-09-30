@@ -1,15 +1,16 @@
-"""Writer -> Executor -> Judge mission pipeline.
+"""Adaptive Writer -> Executor -> (Reviewers) -> Judge mission pipeline.
 
-Divides one mission across several models acting as sub-agents:
-  - WRITER   authors the files-to-create and commands-to-run (no tools).
-  - EXECUTOR (a different model) actually creates those files and runs those
-    commands on Kali through the tool loop, returning real results.
-  - JUDGE    checks the executor's results against pinned acceptance criteria
-    and returns COMPLETE, or CONTINUE with feedback that goes back to the writer.
+PAL sizes the team to the mission. It first assesses the mission's TYPE
+(code / recon / fileops / analysis / general) and COMPLEXITY (1-5), then:
 
-Every model call goes through ``dispatch.generate`` (key_pool rotation +
-guardrails + Headroom). Anthropic/Claude is never selected. No database; a hard
-iteration cap prevents loops.
+  - complexity 1 (easy):     ONE model does the whole thing directly.
+  - complexity 2-3 (moderate): WRITER -> EXECUTOR -> JUDGE.
+  - complexity 4-5 (complex):  + 1-2 REVIEWER sub-agents before the judge.
+
+Models are chosen by capability and mission type; roles get DIFFERENT models so
+work is genuinely divided across accounts. Every call goes through
+``dispatch.generate`` (key_pool rotation + guardrails + Headroom). Anthropic/
+Claude is never selected. No database; a hard iteration cap prevents loops.
 """
 
 from __future__ import annotations
@@ -22,21 +23,27 @@ import re
 
 log = logging.getLogger(__name__)
 
+_TYPES = ("code", "recon", "fileops", "analysis", "general")
+
 _WRITER_SYS = (
     "You are the WRITER sub-agent of a mission. Do NOT run tools. Given the "
-    "mission, the acceptance criteria and any feedback, output ONLY one JSON "
-    "object and nothing else:\n"
+    "mission, acceptance criteria and any feedback, output ONLY one JSON object:\n"
     '{"files":[{"path":"...","content":"..."}],"commands":["..."],'
     '"rationale":"...","done_hint":false}\n'
     "File contents must be complete. Commands are plain bash run on Kali."
 )
+_REVIEWER_SYS = (
+    "You are a REVIEWER sub-agent. Given the mission, the writer's plan and the "
+    "executor's results, output ONLY one JSON object:\n"
+    '{"issues":["..."],"corrections":"...","looks_done":false}\n'
+    "List concrete defects and how to fix them; be terse."
+)
 _JUDGE_SYS = (
-    "You are the JUDGE sub-agent. Given the mission, the acceptance criteria and "
-    "the executor's results, output ONLY one JSON object:\n"
+    "You are the JUDGE sub-agent. Given the mission, acceptance criteria, the "
+    "executor's results and any reviewer notes, output ONLY one JSON object:\n"
     '{"decision":"COMPLETE","reason":"...","feedback":"..."}\n'
     'decision is "COMPLETE" or "CONTINUE". Say COMPLETE only when every '
-    "acceptance criterion is verified by the results; otherwise CONTINUE with "
-    "concrete feedback for the writer."
+    "acceptance criterion is verified; otherwise CONTINUE with concrete feedback."
 )
 
 
@@ -61,6 +68,20 @@ def _pick(models: list[str]) -> str | None:
     return models[0] if models else None
 
 
+def _pick_distinct(models: list[str], used: set[str]) -> str | None:
+    from providers.router import chat_repl
+
+    for m in models:
+        if m in used:
+            continue
+        try:
+            if chat_repl._is_available(m):
+                return m
+        except Exception:
+            pass
+    return _pick([m for m in models if m not in used]) or _pick(models)
+
+
 def _extract_json(text: str) -> dict | None:
     m = re.search(r"\{.*\}", text or "", re.DOTALL)
     if not m:
@@ -71,6 +92,99 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+# --- adaptive assessment ----------------------------------------------------
+
+def _heuristic_assess(goal: str) -> dict:
+    g = goal.lower()
+    if any(w in g for w in ("nmap", "scan", "recon", "enumerate", "subdomain", "port", "exploit", "payload", "nuclei")):
+        typ = "recon"
+    elif any(w in g for w in ("code", "function", "class", "refactor", "implement", "module", "script", "api", "bug", "test")):
+        typ = "code"
+    elif any(w in g for w in ("analyze", "summarize", "explain", "compare", "review", "assess", "report on")):
+        typ = "analysis"
+    elif any(w in g for w in ("file", "create", "write", "move", "rename", "directory", ".txt", ".json", "folder")):
+        typ = "fileops"
+    else:
+        typ = "general"
+    steps = g.count(" and ") + g.count(",") + g.count(" then ") + g.count(";") + g.count(" after ")
+    n = len(goal)
+    if n > 300 or steps >= 5:
+        complexity = 5
+    elif n > 200 or steps >= 3:
+        complexity = 4
+    elif n > 110 or steps >= 2:
+        complexity = 3
+    elif n > 70 or steps >= 1:
+        complexity = 2
+    else:
+        complexity = 1
+    return {"type": typ, "complexity": complexity}
+
+
+def assess_mission(goal: str, model: str | None = None) -> dict:
+    """Classify mission type + complexity (1-5): a cheap model, heuristic fallback."""
+    base = _heuristic_assess(goal)
+    if os.getenv("PAL_MISSION_AUTO", "1").lower() in ("0", "false", "no"):
+        return base
+    from providers.router import dispatch
+
+    m = model or _pick(_env_models("PAL_MISSION_ASSESS_MODELS", ["gemini-3.5-flash-lite", "qwen3"]))
+    if not m:
+        return base
+    try:
+        r = dispatch.generate(
+            m,
+            'Classify this mission. Output ONLY JSON {"type":"code|recon|fileops|analysis|general",'
+            f'"complexity":1-5}}.\nMISSION: {goal}',
+            "You are a concise mission classifier.",
+            temperature=0.0, category="mission", tool="mission", max_output_tokens=80,
+        )
+        j = _extract_json(getattr(r, "content", "") or "")
+        if j and j.get("type") in _TYPES and str(j.get("complexity", "")).strip().isdigit():
+            return {"type": j["type"], "complexity": max(1, min(5, int(j["complexity"])))}
+    except Exception:
+        pass
+    return base
+
+
+def _team_for(complexity: int) -> dict:
+    c = max(1, min(5, int(complexity)))
+    return {"single": c <= 1, "reviewers": max(0, c - 3)}  # c4 -> 1 reviewer, c5 -> 2
+
+
+def _writer_pool(mtype: str) -> list[str]:
+    default = ["gemini-3.5-flash-lite", "openai/gpt-oss-120b", "qwen3"]
+    # code/analysis favour a stronger reasoning model as writer
+    if mtype in ("code", "analysis"):
+        default = ["openai/gpt-oss-120b", "gemini-3.5-flash-lite", "qwen3"]
+    return _env_models("PAL_MISSION_WRITER_MODELS", default)
+
+
+def _executor_pool(mtype: str) -> list[str]:
+    default = ["qwen3", "openai/gpt-oss-120b", "gemini-3.5-flash-lite"]
+    return _env_models("PAL_MISSION_EXECUTOR_MODELS", default)
+
+
+async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
+    from providers.router import chat_repl
+
+    report: dict = {"files_written": [], "results": []}
+    for entry in plan.get("files", []) or []:
+        path, content = entry.get("path"), entry.get("content", "")
+        if path:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(content)
+            report["files_written"].append(path)
+    for cmd in plan.get("commands", []) or []:
+        answer, _tr = await chat_repl._tools_loop(
+            f"Run this exact bash command and report its output: {cmd}",
+            executor, os.getcwd(), max_steps=3, full=full,
+        )
+        report["results"].append({"cmd": cmd, "answer": (answer or "")[:600]})
+    return report
+
+
 async def run_mission(
     goal: str,
     *,
@@ -79,91 +193,102 @@ async def run_mission(
     judge: str | None = None,
     max_iters: int | None = None,
     full: bool = True,
+    auto: bool = True,
 ) -> dict:
-    """Run the writer->executor->judge loop; return a result dict."""
+    """Adaptive mission run. Returns a result dict with the chosen team + transcript."""
     from providers.router import chat_repl, dispatch
 
-    writer = writer or _pick(_env_models("PAL_MISSION_WRITER_MODELS", ["gemini-3.5-flash-lite", "qwen3"]))
-    executor = executor or _pick(_env_models("PAL_MISSION_EXECUTOR_MODELS", ["qwen3", "openai/gpt-oss-120b"]))
-    judge = judge or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", [writer or "qwen3"]))
+    assessment = assess_mission(goal) if auto else {"type": "general", "complexity": 3}
+    team = _team_for(assessment["complexity"])
+    mtype = assessment["type"]
     max_iters = int(max_iters or os.getenv("PAL_MISSION_MAX_ITERS", "4"))
-    criteria = f"The mission is accomplished and verified on disk: {goal}"
 
+    used: set[str] = set()
+    writer = writer or _pick(_writer_pool(mtype))
+    if writer:
+        used.add(writer)
+    executor = executor or _pick_distinct(_executor_pool(mtype), used)
+    if executor:
+        used.add(executor)
+
+    # EASY: one capable model does the whole thing directly via the tool loop.
+    if team["single"] and auto:
+        solo = executor or writer
+        answer, _tr = await chat_repl._tools_loop(goal, solo, os.getcwd(), max_steps=6, full=full)
+        ok = "__ERROR__" not in (answer or "")
+        return {"status": "COMPLETE" if ok else "INCOMPLETE", "mode": "single", "model": solo,
+                "assessment": assessment, "team_size": 1, "answer": (answer or "")[:600]}
+
+    judge = judge or _pick_distinct(_env_models("PAL_MISSION_REVIEWER_MODELS", [writer or "qwen3"]), used) or writer
+    used.add(judge)
+    reviewer_models: list[str] = []
+    for _ in range(team["reviewers"]):
+        rm = _pick_distinct(_executor_pool(mtype) + _writer_pool(mtype), used)
+        if rm:
+            reviewer_models.append(rm)
+            used.add(rm)
+
+    criteria = f"The mission is accomplished and verified on disk: {goal}"
     transcript: list[dict] = []
     feedback = ""
     for iteration in range(1, max_iters + 1):
-        # WRITER (sub-agent): author files + commands
         wr = await asyncio.to_thread(
-            dispatch.generate,
-            writer,
+            dispatch.generate, writer,
             f"MISSION: {goal}\nACCEPTANCE: {criteria}\nFEEDBACK: {feedback or '(none)'}",
-            _WRITER_SYS,
-            temperature=0.2,
-            category="mission",
-            tool="mission",
+            _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
             max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
         )
         plan = _extract_json(getattr(wr, "content", "") or "") or {}
+        report = await _execute_plan(plan, executor, full)
 
-        # EXECUTOR (sub-agent): really write files and run commands on Kali
-        report: dict = {"files_written": [], "results": []}
-        for entry in plan.get("files", []) or []:
-            path, content = entry.get("path"), entry.get("content", "")
-            if path:
-                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-                with open(path, "w") as fh:
-                    fh.write(content)
-                report["files_written"].append(path)
-        for cmd in plan.get("commands", []) or []:
-            answer, _tr = await chat_repl._tools_loop(
-                f"Run this exact bash command and report its output: {cmd}",
-                executor,
-                os.getcwd(),
-                max_steps=3,
-                full=full,
+        review_notes = []
+        for rm in reviewer_models:
+            rr = await asyncio.to_thread(
+                dispatch.generate, rm,
+                f"MISSION: {goal}\nPLAN: {json.dumps(plan)[:2000]}\nRESULTS: {json.dumps(report)[:2000]}",
+                _REVIEWER_SYS, temperature=0.2, category="mission", tool="mission", max_output_tokens=300,
             )
-            report["results"].append({"cmd": cmd, "answer": (answer or "")[:600]})
+            review_notes.append({"model": rm, "note": _extract_json(getattr(rr, "content", "") or "") or {}})
 
-        # JUDGE (sub-agent): verify against pinned criteria
         jr = await asyncio.to_thread(
-            dispatch.generate,
-            judge,
-            f"MISSION: {goal}\nACCEPTANCE: {criteria}\nRESULTS: {json.dumps(report)[:4000]}",
-            _JUDGE_SYS,
-            temperature=0.1,
-            category="mission",
-            tool="mission",
+            dispatch.generate, judge,
+            f"MISSION: {goal}\nACCEPTANCE: {criteria}\nRESULTS: {json.dumps(report)[:3000]}\n"
+            f"REVIEWS: {json.dumps(review_notes)[:1500]}",
+            _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
         )
         verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE", "feedback": "no verdict"}
-        transcript.append({
-            "iteration": iteration, "writer": writer, "executor": executor, "judge": judge,
-            "plan": plan, "exec": report, "verdict": verdict,
-        })
+        transcript.append({"iteration": iteration, "writer": writer, "executor": executor,
+                           "reviewers": reviewer_models, "judge": judge, "plan": plan,
+                           "exec": report, "reviews": review_notes, "verdict": verdict})
         if str(verdict.get("decision", "")).upper() == "COMPLETE":
-            return {"status": "COMPLETE", "iterations": iteration, "writer": writer,
-                    "executor": executor, "judge": judge, "transcript": transcript}
+            return {"status": "COMPLETE", "mode": "team", "iterations": iteration,
+                    "assessment": assessment, "team_size": 3 + len(reviewer_models),
+                    "writer": writer, "executor": executor, "reviewers": reviewer_models,
+                    "judge": judge, "transcript": transcript}
         feedback = verdict.get("feedback", "")
 
-    return {"status": "INCOMPLETE", "iterations": max_iters, "writer": writer,
-            "executor": executor, "judge": judge, "transcript": transcript}
+    return {"status": "INCOMPLETE", "mode": "team", "iterations": max_iters,
+            "assessment": assessment, "team_size": 3 + len(reviewer_models),
+            "writer": writer, "executor": executor, "reviewers": reviewer_models,
+            "judge": judge, "transcript": transcript}
 
 
 def run_mission_sync(goal: str, **kwargs) -> dict:
-    """Blocking wrapper for CLI use."""
     return asyncio.run(run_mission(goal, **kwargs))
 
 
 def main(argv: list[str]) -> int:
-    """CLI: pal mission "<goal>" [--writer M] [--executor M] [--judge M] [--max-iters N] [--json]"""
+    """CLI: pal mission "<goal>" [--writer M] [--executor M] [--judge M] [--max-iters N] [--no-auto] [--json]"""
     import argparse
 
-    ap = argparse.ArgumentParser(prog="pal mission", description="writer->executor->judge mission")
-    ap.add_argument("goal", help="the mission goal")
+    ap = argparse.ArgumentParser(prog="pal mission", description="adaptive writer->executor->judge mission")
+    ap.add_argument("goal")
     ap.add_argument("--writer")
     ap.add_argument("--executor")
     ap.add_argument("--judge")
     ap.add_argument("--max-iters", type=int)
-    ap.add_argument("--ro", action="store_true", help="read-only executor tools")
+    ap.add_argument("--no-auto", action="store_true", help="disable auto team-sizing")
+    ap.add_argument("--ro", action="store_true")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 
@@ -173,14 +298,17 @@ def main(argv: list[str]) -> int:
     configure_providers()
     res = run_mission_sync(
         a.goal, writer=a.writer, executor=a.executor, judge=a.judge,
-        max_iters=a.max_iters, full=not a.ro,
+        max_iters=a.max_iters, full=not a.ro, auto=not a.no_auto,
     )
     if a.json:
         print(json.dumps(res, indent=2))
     else:
-        print(f"status: {res['status']}  iterations: {res['iterations']}")
-        print(f"writer={res['writer']}  executor={res['executor']}  judge={res['judge']}")
-        last = (res.get("transcript") or [{}])[-1]
-        print(f"files_written: {last.get('exec', {}).get('files_written', [])}")
-        print(f"verdict: {last.get('verdict', {}).get('reason', '')[:200]}")
+        asmt = res.get("assessment", {})
+        print(f"status: {res['status']}  mode: {res.get('mode')}  team_size: {res.get('team_size')}")
+        print(f"assessed: type={asmt.get('type')} complexity={asmt.get('complexity')}")
+        if res.get("mode") == "single":
+            print(f"model: {res.get('model')}")
+        else:
+            print(f"writer={res.get('writer')} executor={res.get('executor')} "
+                  f"reviewers={res.get('reviewers')} judge={res.get('judge')}")
     return 0 if res["status"] == "COMPLETE" else 1
