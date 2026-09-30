@@ -285,6 +285,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     convo = task
     transcript: list[tuple[str, dict, str]] = []
     last = ""
+    seen_calls: set[str] = set()  # (name,args) signatures already run this loop
     try:
         for _ in range(max_steps):
             # trim accumulated context to fit the token budget: keep the task
@@ -318,10 +319,36 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 return (_TOOL_TAGS.sub("", text).strip() or "(no answer)", transcript)
             results = []
             for name, args in calls:
+                # Idempotency guard: never run the SAME (name,args) twice in one
+                # loop. A backgrounded/GUI launch (e.g. `burpsuite &`) returns no
+                # stdout, so the model can't tell it worked and re-emits the same
+                # launch every step -- spawning many copies. Short-circuit repeats
+                # with a clear "already done" result so the model finalizes.
+                try:
+                    sig = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+                except Exception:
+                    sig = f"{name}:{args!r}"
+                if sig in seen_calls:
+                    res = (
+                        "(already executed this exact command earlier in this "
+                        "session — it succeeded; do NOT run it again. If it was a "
+                        "launch/background command the process is already running. "
+                        "Give your final answer now with NO tool_call.)"
+                    )
+                    transcript.append((name, args, res))
+                    results.append(react.format_result(name, res))
+                    continue
+                seen_calls.add(sig)
                 try:
                     res = tb.execute(name, args, caller_model=model)
                 except Exception as exc:
                     res = f"error: {exc}"
+                # Enrich empty output so a backgrounded/GUI launch reads as success
+                # rather than a silent failure the model feels compelled to retry.
+                if name == "bash" and not (res or "").strip():
+                    res = ("(command executed; no stdout captured. For a "
+                           "backgrounded or GUI launch this means it started "
+                           "successfully — do not repeat it.)")
                 transcript.append((name, args, res))
                 results.append(react.format_result(name, res))
             convo = (
@@ -495,12 +522,14 @@ def _available_models() -> list[str]:
         "gemini-3.1-pro-preview", "pro", "gemini-3-pro-preview", "nemotron",
         "DeepSeek-V4-Flash-0731", "gemini3", "gemini-pro", "gemini-pro-2.5",
     }
-    seen: set[str] = set()
+    seen_labels: set[str] = set()
+    seen_canon: set[str] = set()  # (provider, canonical model) -- collapses aliases
     out: list[str] = []
     for m in cands:
-        if m in seen or m in dead:
+        # bare "auto" clashes with the menu's own "0. auto" routing option.
+        if m in seen_labels or m in dead or m == "auto":
             continue
-        seen.add(m)
+        seen_labels.add(m)
         try:
             if not _is_available(m):
                 continue
@@ -510,6 +539,21 @@ def _available_models() -> list[str]:
             prov = ModelProviderRegistry.get_provider_for_model(m)
             if prov is None or type(prov).__name__ == "OpenRouterProvider":
                 continue
+            # Collapse aliases: "flash"/"gemini-3.6-flash", "gpt-oss-120b"/
+            # "openai/gpt-oss-120b", "qwen3"/"qwen/qwen3.8-27b" all resolve to the
+            # same canonical model -- show each real model once. First (usually
+            # the fully-qualified) label wins.
+            canon = m
+            resolver = getattr(prov, "_resolve_model_name", None)
+            if resolver:
+                try:
+                    canon = resolver(m) or m
+                except Exception:
+                    canon = m
+            ckey = f"{type(prov).__name__}:{canon}"
+            if ckey in seen_canon:
+                continue
+            seen_canon.add(ckey)
             out.append(m)
         except Exception:
             pass
