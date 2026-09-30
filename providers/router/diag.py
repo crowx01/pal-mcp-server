@@ -23,7 +23,21 @@ _SECRET_VAL = re.compile(
 )
 _MAX_STR = 200
 # key names that look secret-ish but are plain counters/booleans in our snapshots
-_SAFE_KEYS = frozenset({"tokens_per_min", "tpm_used", "tpm_cap", "tokens", "prompt_tokens", "max_tokens"})
+_SAFE_KEYS = frozenset(
+    {
+        "tokens_per_min",
+        "tpm_used",
+        "tpm_cap",
+        "tokens",
+        "prompt_tokens",
+        "max_tokens",
+        # key_pool stats: plain counters/booleans, never key values
+        "key_pool",
+        "keys",
+        "cooling",
+        "active_index",
+    }
+)
 
 
 def _scrub(obj, key: str | None = None):
@@ -49,6 +63,11 @@ def _safe(fn, default):
         return fn()
     except Exception as exc:  # diagnostics must never crash
         return {"error": f"{type(exc).__name__}: {exc}"} if default is None else default
+
+
+def _key_pool_view():
+    from providers.router import key_pool
+    return {"enabled": key_pool.is_enabled(), "providers": key_pool.stats()}
 
 
 def collect() -> dict:
@@ -223,6 +242,7 @@ def collect() -> dict:
             "headroom": _safe(_headroom_view, None),
             "catalog": _safe(_catalog_view, None),
             "tool_pool": _safe(_tool_pool_view, None),
+            "key_pool": _safe(_key_pool_view, None),
             "debate": _safe(_debate_view, None),
             "cache": _safe(response_cache.snapshot, {}),
             "refusals": _safe(refusal_memory.snapshot, {}),
@@ -246,6 +266,7 @@ SECTIONS = (
     "headroom",
     "catalog",
     "tool_pool",
+    "key_pool",
     "debate",
     "episodes",
     "bandit",

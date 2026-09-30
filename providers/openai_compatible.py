@@ -60,6 +60,11 @@ class OpenAICompatibleProvider(ModelProvider):
                 "This may be insecure. Consider setting an API key for authentication."
             )
 
+    def set_api_key(self, api_key: str) -> None:
+        """Swap the API key and drop the cached client so the next call uses it (key rotation)."""
+        self.api_key = api_key
+        self._client = None
+
     def _ensure_model_allowed(
         self,
         capabilities: ModelCapabilities,

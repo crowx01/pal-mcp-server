@@ -27,6 +27,7 @@ def generate(
     temperature: float = 0.3,
     category: str = "",
     tool: str = "repl",
+    max_output_tokens: int | None = None,
 ):
     """Resolve a provider for ``model``, reroute/fall back as needed, and
     record the outcome (success/refusal/error) to episode_store + refusal_memory.
@@ -46,10 +47,43 @@ def generate(
         dispatch_model = alt
 
     def _invoke(_model: str):
+        from providers.router import key_pool
+
         prov = ModelProviderRegistry.get_provider_for_model(_model)
         if prov is None:
             raise RuntimeError(f"no provider for {_model}")
-        return prov.generate_content(prompt, _model, system, temperature)
+        _name = None
+        _keys: list[str] = []
+        if key_pool.is_enabled():
+            try:
+                _name = key_pool.name_for_type(getattr(prov.get_provider_type(), "value", ""))
+                _keys = key_pool.keys_for(_name) if _name else []
+            except Exception:
+                _name, _keys = None, []
+        _last = None
+        for _ in range(max(1, len(_keys))):
+            try:
+                _resp = prov.generate_content(
+                    prompt, _model, system, temperature, max_output_tokens=max_output_tokens
+                )
+                if _name and getattr(prov, "api_key", None):
+                    key_pool.mark_ok(_name, prov.api_key)
+                return _resp
+            except Exception as exc:  # noqa: BLE001 - reclassified by caller
+                _last = exc
+                if (
+                    _keys
+                    and key_pool.is_rate_or_credit_error(str(exc))
+                    and hasattr(prov, "set_api_key")
+                ):
+                    _nk = key_pool.rotate(_name, getattr(prov, "api_key", None), type(exc).__name__)
+                    if _nk and _nk != getattr(prov, "api_key", None):
+                        prov.set_api_key(_nk)
+                        continue
+                raise
+        if _last:
+            raise _last
+        raise RuntimeError(f"no provider for {_model}")
 
     t0 = time.time()
     try:

@@ -293,6 +293,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                     temperature=0.2,
                     category="tools",
                     tool="tools",
+                    max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
                 )
                 text = getattr(resp, "content", "") or ""
             except Exception as exc:

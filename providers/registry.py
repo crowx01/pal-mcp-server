@@ -345,7 +345,26 @@ class ModelProviderRegistry:
         if not env_var:
             return None
 
-        return get_env(env_var)
+        env_key = get_env(env_var)
+
+        # Multi-key rotation: only supplement an ALREADY-configured provider —
+        # never fabricate availability. If the env key is a real (non-placeholder)
+        # key and ~/.pal/keys.json has keys for this provider, prefer the pool's
+        # current healthy (rotated) key.
+        if env_key and not env_key.startswith("your_"):
+            try:
+                from providers.router import key_pool
+
+                if key_pool.is_enabled():
+                    _name = key_pool.name_for_type(getattr(provider_type, "value", str(provider_type)))
+                    if _name:
+                        _k = key_pool.current(_name)
+                        if _k:
+                            return _k
+            except Exception:
+                pass
+
+        return env_key
 
     @classmethod
     def _get_allowed_models_for_provider(cls, provider: ModelProvider, provider_type: ProviderType) -> list[str]:
