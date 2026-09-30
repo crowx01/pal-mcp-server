@@ -224,12 +224,100 @@ def _repo_context(goal: str, max_bytes: int = 8000) -> str:
     return "\n\n".join(parts)
 
 
+def _is_protected(path: str) -> bool:
+    """Never let a mission write/overwrite credentials or config."""
+    if os.getenv("PAL_MISSION_ALLOW_SENSITIVE", "0") in ("1", "true", "yes"):
+        return False
+    p = os.path.abspath(os.path.expanduser(path or ""))
+    base = os.path.basename(p)
+    if base == ".env" or base.startswith(".env.") or base == "keys.json":
+        return True
+    if os.path.join(os.path.expanduser("~"), ".pal") in p and base.endswith(".json"):
+        return True
+    return False
+
+
+async def _panel_models(mtype: str, cap: int) -> list[str]:
+    from providers.router import chat_repl
+
+    candidates = _writer_pool(mtype) + _executor_pool(mtype) + [
+        "command-r-08-2024",
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "Qwen/Qwen3.8-27B",
+        "deepseek-ai/DeepSeek-V4.1-Flash",
+        "zai-org/GLM-5.3-Flash",
+        "openai/gpt-oss-20b",
+        "gemini-flash-latest",
+    ]
+    picked: list[str] = []
+    for m in candidates:
+        if m in picked or "claude" in m.lower() or "anthropic" in m.lower():
+            continue
+        try:
+            if chat_repl._is_available(m):
+                picked.append(m)
+        except Exception:
+            pass
+        if len(picked) >= cap:
+            break
+    return picked
+
+
+async def run_panel(goal, models, judge, full):
+    """Fan a mission out across MANY models in parallel (8-10): decompose into
+    independent subtasks, run each on a distinct model concurrently, then judge."""
+    from providers.router import dispatch
+
+    criteria = f"The mission is accomplished and verified on disk: {goal}"
+    dec = await asyncio.to_thread(
+        dispatch.generate, models[0],
+        f'Split this mission into up to {len(models)} INDEPENDENT subtasks. '
+        f'Output ONLY JSON {{"subtasks":["...","..."]}}.\nMISSION: {goal}',
+        "You are a terse mission decomposer.", temperature=0.2,
+        category="mission", tool="mission", max_output_tokens=500,
+    )
+    subs = (_extract_json(getattr(dec, "content", "") or "") or {}).get("subtasks") or [goal]
+    subs = subs[: len(models)]
+    repo_ctx = _repo_context(goal)
+
+    async def _do(i, sub):
+        m = models[i % len(models)]
+        try:
+            wr = await asyncio.to_thread(
+                dispatch.generate, m,
+                f"REPO CONTEXT:\n{repo_ctx}\n\nSUBTASK: {sub}\nMISSION: {goal}",
+                _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
+                max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+            )
+            plan = _extract_json(getattr(wr, "content", "") or "") or {}
+            rep = await _execute_plan(plan, m, full)
+            return {"subtask": sub, "model": m, "exec": rep}
+        except Exception as exc:
+            return {"subtask": sub, "model": m, "error": str(exc)[:120]}
+
+    results = await asyncio.gather(*[_do(i, s) for i, s in enumerate(subs)])
+    jr = await asyncio.to_thread(
+        dispatch.generate, judge,
+        f"MISSION: {goal}\nACCEPTANCE: {criteria}\nPANEL_RESULTS: {json.dumps(results)[:4000]}",
+        _JUDGE_SYS, temperature=0.1, category="mission", tool="mission",
+    )
+    verdict = _extract_json(getattr(jr, "content", "") or "") or {"decision": "CONTINUE"}
+    return {
+        "status": "COMPLETE" if str(verdict.get("decision", "")).upper() == "COMPLETE" else "INCOMPLETE",
+        "mode": "panel", "team_size": len(models), "models": models,
+        "subtasks": subs, "results": results, "judge": judge, "verdict": verdict,
+    }
+
+
 async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
     from providers.router import chat_repl
 
     report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": []}
     for e in plan.get("edits", []) or []:
         path, old, new = e.get("path"), e.get("old"), e.get("new")
+        if path and _is_protected(path):
+            report["edits_failed"].append({"path": path, "reason": "protected path (config/creds)"})
+            continue
         if path and old is not None and os.path.isfile(path):
             try:
                 cur = open(path).read()
@@ -243,6 +331,9 @@ async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
                 report["edits_failed"].append({"path": path, "reason": str(exc)[:80]})
     for entry in plan.get("files", []) or []:
         path, content = entry.get("path"), entry.get("content", "")
+        if path and _is_protected(path):
+            report["edits_failed"].append({"path": path, "reason": "protected path (config/creds)"})
+            continue
         if path:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w") as fh:
@@ -279,6 +370,17 @@ async def run_mission(
     team = _team_for(assessment["complexity"])
     mtype = assessment["type"]
     max_iters = int(max_iters or os.getenv("PAL_MISSION_MAX_ITERS", "4"))
+
+    # PANEL: many models in parallel for complex missions (or PAL_MISSION_PANEL=1).
+    _panel = os.getenv("PAL_MISSION_PANEL", "auto").lower()
+    if auto and (_panel in ("1", "true", "yes") or (_panel == "auto" and assessment["complexity"] >= 4)):
+        cap = int(os.getenv("PAL_MISSION_PANEL_MAX", "10"))
+        pmodels = await _panel_models(mtype, cap)
+        if len(pmodels) >= 3:
+            pjudge = judge or _pick(_env_models("PAL_MISSION_REVIEWER_MODELS", ["gemini-3.5-flash-lite"]))
+            res = await run_panel(goal, pmodels, pjudge, full)
+            res["assessment"] = assessment
+            return res
 
     used: set[str] = set()
     writer = writer or _pick(_writer_pool(mtype))

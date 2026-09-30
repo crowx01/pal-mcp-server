@@ -125,3 +125,21 @@ def test_execute_plan_edit_miss_recorded(tmp_path):
     plan = {"edits": [{"path": str(f), "old": "NOTHERE", "new": "z"}], "files": [], "commands": []}
     rep = _a.run(mission._execute_plan(plan, "e", False))
     assert rep["edits_failed"] and f.read_text() == "a = 1\n"
+
+
+def test_protected_paths_blocked(tmp_path, monkeypatch):
+    import asyncio as _a
+    env = tmp_path / ".env"
+    env.write_text("SECRET=1")
+    monkeypatch.delenv("PAL_MISSION_ALLOW_SENSITIVE", raising=False)
+    plan = {"files": [{"path": str(env), "content": "WIPED"}],
+            "edits": [{"path": str(env), "old": "SECRET=1", "new": "X"}], "commands": []}
+    rep = _a.run(mission._execute_plan(plan, "e", False))
+    assert env.read_text() == "SECRET=1"  # untouched
+    assert any("protected" in str(x) for x in rep["edits_failed"])
+
+
+def test_is_protected():
+    assert mission._is_protected("/home/kali/tools/pal-mcp-server/.env")
+    assert mission._is_protected("/home/kali/.pal/keys.json")
+    assert not mission._is_protected("/tmp/whatever.py")
