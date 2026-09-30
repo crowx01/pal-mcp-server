@@ -201,20 +201,15 @@ def _repo_context(goal: str, max_bytes: int = 8000) -> str:
                 pass
             if len(files) >= 6:
                 break
-    try:
-        from headroom import SmartCrusher
-        sc = SmartCrusher()
-    except Exception:
-        sc = None
+    # RAW content (never compressed): the writer emits exact old->new edit
+    # snippets that must match the file byte-for-byte, so compression would
+    # break edit matching. Cap total size to stay within budget.
     parts, total = [], 0
     for fp in files[:6]:
         try:
             c = open(fp).read()
-            if sc:
-                r = sc.crush(c)
-                if getattr(r, "was_modified", False) and len(r.compressed) < len(c):
-                    c = r.compressed
-            c = c[:3000]
+            if len(c) > max_bytes:
+                c = c[:max_bytes] + "\n...[truncated]..."
             parts.append(f"--- FILE {fp} ---\n{c}")
             total += len(c)
             if total >= max_bytes:
