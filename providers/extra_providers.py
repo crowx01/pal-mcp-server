@@ -74,6 +74,37 @@ def _make_provider(base_url, friendly, ptype, allow, api_key):
     return _Extra
 
 
+def _make_anthropic_provider(base_url, friendly, ptype, allow, api_key, extra_headers):
+    """Factory for Anthropic Messages wire-format endpoints (non-Claude gateways).
+
+    Mirrors ``_make_provider`` but builds on AnthropicCompatibleProvider, which
+    refuses api.anthropic.com base URLs and claude-* model names.
+    """
+    from providers.anthropic_compatible import AnthropicCompatibleProvider
+
+    class _ExtraAnthropic(AnthropicCompatibleProvider):
+        FRIENDLY_NAME = friendly
+
+        def __init__(self, api_key=None, **kw):
+            super().__init__(
+                api_key or api_key_default,
+                base_url=base_url,
+                extra_headers=dict(extra_headers or {}),
+                **kw,
+            )
+
+        def get_provider_type(self):
+            return ptype
+
+        def validate_model_name(self, model_name: str) -> bool:
+            if not super().validate_model_name(model_name):
+                return False
+            return model_name in allow
+
+    api_key_default = api_key
+    return _ExtraAnthropic
+
+
 def register_extras(registry) -> None:
     if os.getenv("PYTEST_CURRENT_TEST"):
         return  # inert during tests to avoid catalog pollution
@@ -101,7 +132,17 @@ def register_extras(registry) -> None:
                 continue
 
             p_type = _ensure_provider_type(name)
-            klass = _make_provider(base, name.title(), p_type, set(models), keys[0])
+            api = str((info or {}).get("api", "")).lower()
+            if api == "anthropic":
+                if "anthropic.com" in base.lower():
+                    log.debug("extra_providers: refusing anthropic.com base for %s", name)
+                    continue
+                headers = (info or {}).get("extra_headers") or {}
+                klass = _make_anthropic_provider(
+                    base, name.title(), p_type, set(models), keys[0], headers
+                )
+            else:
+                klass = _make_provider(base, name.title(), p_type, set(models), keys[0])
             registry.register_provider(p_type, klass)
             # Pre-build the instance (key baked in) so get_provider returns it
             # directly without needing a *_API_KEY env mapping.

@@ -15,5 +15,6 @@ class ProviderType(Enum):
     OPENROUTER = "openrouter"
     HUGGINGFACE = "huggingface"
     COHERE = "cohere"
+    ANTHROPIC_COMPAT = "anthropic_compat"
     CUSTOM = "custom"
     DIAL = "dial"
