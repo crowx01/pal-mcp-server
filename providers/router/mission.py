@@ -169,7 +169,7 @@ def _executor_pool(mtype: str) -> list[str]:
     return _env_models("PAL_MISSION_EXECUTOR_MODELS", default)
 
 
-def _repo_context(goal: str, max_bytes: int = 8000) -> str:
+def _repo_context(goal: str, max_bytes: int = 18000) -> str:
     """Current content of repo files relevant to the goal (headroom-compressed),
     so the writer modifies real code instead of guessing."""
     import subprocess
