@@ -185,6 +185,11 @@ async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
     return report
 
 
+def _goal_artifacts(goal: str) -> list[str]:
+    """Absolute-ish file paths the goal asks to produce, for on-disk verification."""
+    return re.findall(r"(/[\w./\-]+\.[A-Za-z0-9]{1,6})", goal or "")
+
+
 async def run_mission(
     goal: str,
     *,
@@ -215,9 +220,18 @@ async def run_mission(
     if team["single"] and auto:
         solo = executor or writer
         answer, _tr = await chat_repl._tools_loop(goal, solo, os.getcwd(), max_steps=6, full=full)
-        ok = "__ERROR__" not in (answer or "")
+        artifacts = _goal_artifacts(goal)
+        if artifacts:
+            # completion is decided by the artifacts existing on disk, not by
+            # whether the tool loop emitted a clean final answer.
+            missing = [p for p in artifacts if not os.path.exists(p)]
+            ok = not missing
+        else:
+            ok = "__ERROR__" not in (answer or "")
+            missing = []
         return {"status": "COMPLETE" if ok else "INCOMPLETE", "mode": "single", "model": solo,
-                "assessment": assessment, "team_size": 1, "answer": (answer or "")[:600]}
+                "assessment": assessment, "team_size": 1, "artifacts": artifacts,
+                "missing": missing, "answer": (answer or "")[:600]}
 
     judge = judge or _pick_distinct(_env_models("PAL_MISSION_REVIEWER_MODELS", [writer or "qwen3"]), used) or writer
     used.add(judge)

@@ -86,3 +86,23 @@ def test_team_for_scales():
 def test_heuristic_type_detection():
     assert mission._heuristic_assess("nmap scan of the target")["type"] == "recon"
     assert mission._heuristic_assess("implement a python function")["type"] == "code"
+
+
+def test_goal_artifacts_parsed():
+    a = mission._goal_artifacts("create /tmp/mission_demo/report.txt and also /tmp/x.json please")
+    assert "/tmp/mission_demo/report.txt" in a and "/tmp/x.json" in a
+
+
+def test_single_mode_completes_when_artifact_exists(monkeypatch, tmp_path):
+    target = tmp_path / "made.txt"
+    target.write_text("done")
+
+    async def fake_loop(task, model, cwd, max_steps=6, full=True):
+        return ("[reached max tool steps]", [])  # no clean final answer
+
+    monkeypatch.setattr("providers.router.chat_repl._tools_loop", fake_loop)
+    monkeypatch.setattr(mission, "assess_mission", lambda g: {"type": "fileops", "complexity": 1})
+    monkeypatch.setattr(mission, "_pick", lambda models: "solo-model")
+    res = asyncio.run(mission.run_mission(f"write ok to {target}", auto=True))
+    assert res["mode"] == "single"
+    assert res["status"] == "COMPLETE"  # artifact exists despite max-steps
