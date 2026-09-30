@@ -536,6 +536,15 @@ def configure_providers():
         registered_providers.append(ProviderType.OPENROUTER.value)
         logger.debug(f"Registered provider: {ProviderType.OPENROUTER.value}")
 
+    # HuggingFace router (OpenAI-compatible; org/model ids)
+    hf_key = get_env("HUGGINGFACE_API_KEY")
+    if hf_key and hf_key != "your_huggingface_api_key_here":
+        from providers.huggingface import HuggingFaceProvider
+
+        ModelProviderRegistry.register_provider(ProviderType.HUGGINGFACE, HuggingFaceProvider)
+        registered_providers.append(ProviderType.HUGGINGFACE.value)
+        logger.debug(f"Registered provider: {ProviderType.HUGGINGFACE.value}")
+
     # Log all registered providers
     if registered_providers:
         logger.info(f"Registered providers: {', '.join(registered_providers)}")
