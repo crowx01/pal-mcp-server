@@ -82,6 +82,11 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
                 self._client = genai.Client(api_key=self.api_key)
         return self._client
 
+    def set_api_key(self, api_key: str) -> None:
+        """Swap the API key and drop the cached client so the next call uses it (key rotation)."""
+        self.api_key = api_key
+        self._client = None
+
     def _resolve_http_timeout(self) -> Optional[float]:
         """Compute timeout override from shared custom timeout environment variables."""
 
