@@ -97,6 +97,29 @@ class LessonRejected(ValueError):
     """Raised when a lesson fails origin-channel authentication/validation."""
 
 
+_REVIEW_PATH = os.path.expanduser("~/.pal/ethics_review.jsonl")
+
+
+def _auto_learn_enabled() -> bool:
+    return os.getenv("PAL_LEARN_AUTO", "1").lower() not in ("0", "false", "no")
+
+
+def _queue_ethics_review(text: str, scope: str, category, target_model) -> None:
+    """Divert an ethically sensitive lesson to a human-review queue instead of
+    persisting it (the safety cap on auto-learning)."""
+    import time
+
+    try:
+        os.makedirs(os.path.dirname(_REVIEW_PATH), exist_ok=True)
+        with open(_REVIEW_PATH, "a", encoding="utf-8") as fp:
+            fp.write(json.dumps({
+                "ts": time.time(), "scope": scope, "category": category,
+                "target_model": target_model, "lesson": text[:1000],
+            }) + "\n")
+    except OSError as exc:
+        log.warning("ethics review queue write failed: %s", exc)
+
+
 def emit_lesson(
     teacher_id: str,
     scope: str,
@@ -115,7 +138,16 @@ def emit_lesson(
     """
     if not is_enabled():
         raise LessonRejected("lesson store disabled")
-    if teacher_id not in TEACHERS:
+    # Ethical safety cap: sensitive content is never auto-learned; queue it for
+    # explicit human review instead of persisting.
+    from providers.router import ethics_gate
+
+    if ethics_gate.is_ethically_sensitive(rationale):
+        _queue_ethics_review(rationale, scope, category, target_model)
+        raise LessonRejected("ethically sensitive: queued for human review (not auto-learned)")
+    # Auto-learning (PAL_LEARN_AUTO, default on) accepts lessons from any source;
+    # the strict teacher allowlist applies only when auto-learning is disabled.
+    if teacher_id not in TEACHERS and not _auto_learn_enabled():
         raise LessonRejected(f"unknown teacher_id {teacher_id!r} (channel not authenticated)")
     if scope not in SCOPES:
         raise LessonRejected(f"unknown scope {scope!r}")
