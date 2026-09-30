@@ -14,5 +14,6 @@ class ProviderType(Enum):
     XAI = "xai"
     OPENROUTER = "openrouter"
     HUGGINGFACE = "huggingface"
+    COHERE = "cohere"
     CUSTOM = "custom"
     DIAL = "dial"

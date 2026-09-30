@@ -545,6 +545,14 @@ def configure_providers():
         registered_providers.append(ProviderType.HUGGINGFACE.value)
         logger.debug(f"Registered provider: {ProviderType.HUGGINGFACE.value}")
 
+    cohere_key = get_env("COHERE_API_KEY")
+    if cohere_key and cohere_key != "your_cohere_api_key_here":
+        from providers.cohere import CohereProvider
+
+        ModelProviderRegistry.register_provider(ProviderType.COHERE, CohereProvider)
+        registered_providers.append(ProviderType.COHERE.value)
+        logger.debug(f"Registered provider: {ProviderType.COHERE.value}")
+
     # Log all registered providers
     if registered_providers:
         logger.info(f"Registered providers: {', '.join(registered_providers)}")
