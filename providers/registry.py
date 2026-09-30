@@ -42,6 +42,8 @@ class ModelProviderRegistry:
         ProviderType.XAI,  # Direct X.AI GROK access
         ProviderType.DIAL,  # DIAL unified API access
         ProviderType.CUSTOM,  # Local/self-hosted models
+        ProviderType.COHERE,  # Cohere (command-* ids, no slash)
+        ProviderType.HUGGINGFACE,  # HF router (org/model ids) before the catch-all
         ProviderType.OPENROUTER,  # Catch-all for cloud models
     ]
 

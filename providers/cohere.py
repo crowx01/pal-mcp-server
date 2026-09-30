@@ -21,7 +21,7 @@ class CohereProvider(OpenAICompatibleProvider):
         return ProviderType.COHERE
 
     def _lookup_capabilities(self, canonical_name: str, requested_name: str | None = None):
-        if canonical_name:
+        if canonical_name and "/" not in canonical_name:
             cap = ModelCapabilities(
                 provider=ProviderType.COHERE,
                 model_name=canonical_name,
@@ -39,3 +39,13 @@ class CohereProvider(OpenAICompatibleProvider):
             return cap
         logging.debug("Cohere: empty model name rejected")
         return None
+
+    def generate_content(self, prompt, model_name, system_prompt=None, temperature=0.3,
+                         max_output_tokens=None, **kwargs):
+        # Cohere command-* models cap output at 4096.
+        if max_output_tokens is None or max_output_tokens > 4096:
+            max_output_tokens = 4096
+        return super().generate_content(
+            prompt, model_name, system_prompt, temperature,
+            max_output_tokens=max_output_tokens, **kwargs
+        )
