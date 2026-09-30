@@ -279,6 +279,15 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     # keep each request under the provider's input-token cap (Groq ITPM is small);
     # chars/4 ~= tokens, so 16000 chars ~= 4k tokens, safely under a 7k limit.
     budget = int(os.getenv("PAL_TOOLS_CTX_CHARS", "16000"))
+    # Per-model output cap. Groq free-tier OTPM is tiny (e.g. qwen3.8-27b = 1000
+    # output tokens/min): a flat 8192 max_output_tokens makes Groq reject the
+    # request upfront with 429 "Requested N > Limit 1000". Cap Groq outputs low.
+    _max_out = int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192"))
+    try:
+        if "groq" in (getattr(prov, "base_url", "") or "").lower():
+            _max_out = min(_max_out, int(os.getenv("PAL_GROQ_OTPM_CAP", "800")))
+    except Exception:
+        pass
     prev_flag = os.environ.get("PAL_BASH_UNRESTRICTED")
     if full:
         os.environ["PAL_BASH_UNRESTRICTED"] = "1"
@@ -303,7 +312,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                     temperature=0.2,
                     category="tools",
                     tool="tools",
-                    max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
+                    max_output_tokens=_max_out,
                     tools=_oai_tools,
                 )
                 text = getattr(resp, "content", "") or ""

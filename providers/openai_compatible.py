@@ -691,7 +691,15 @@ class OpenAICompatibleProvider(ModelProvider):
             response = self.client.chat.completions.create(**completion_params)
 
             _msg = response.choices[0].message
-            content = _msg.content or ""
+            # Reasoning models (e.g. aion-labs/aion-3.5) return message.content=""
+            # and put the answer in message.reasoning / reasoning_content. Fall
+            # back to those so PAL doesn't see an empty "no answer".
+            content = (
+                _msg.content
+                or getattr(_msg, "reasoning", "")
+                or getattr(_msg, "reasoning_content", "")
+                or ""
+            )
             usage = self._extract_usage(response)
 
             _tool_calls = []
