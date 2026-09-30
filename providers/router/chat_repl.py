@@ -491,10 +491,14 @@ def _available_models() -> list[str]:
         "openrouter/free", "nemotron-3-nano:30b", "auto",
         "aion-labs/aion-rp-llama-3.1-8b",
     ]
+    dead = {
+        "gemini-3.1-pro-preview", "pro", "gemini-3-pro-preview", "nemotron",
+        "DeepSeek-V4-Flash-0731", "gemini3", "gemini-pro", "gemini-pro-2.5",
+    }
     seen: set[str] = set()
     out: list[str] = []
     for m in cands:
-        if m in seen:
+        if m in seen or m in dead:
             continue
         seen.add(m)
         try:
