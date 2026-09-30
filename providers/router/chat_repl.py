@@ -274,7 +274,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     from providers.router.tools_pool import tool_transport_for
 
     _transport = tool_transport_for(model) if os.getenv("PAL_TOOLS_TRANSPORT", "auto") != "text" else "text"
-    _oai_tools = tb.openai_schema() if _transport == "openai_tools" else None
+    _oai_tools = tb.openai_schema() if _transport in ("openai_tools", "gemini_tools") else None
     # keep each request under the provider's input-token cap (Groq ITPM is small);
     # chars/4 ~= tokens, so 16000 chars ~= 4k tokens, safely under a 7k limit.
     budget = int(os.getenv("PAL_TOOLS_CTX_CHARS", "16000"))

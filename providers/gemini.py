@@ -206,6 +206,25 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
         if max_output_tokens:
             generation_config.max_output_tokens = max_output_tokens
 
+        # Structured function-calling: convert OpenAI-style tool dicts to Gemini
+        # function declarations so Gemini emits real function calls (not text tags).
+        _tools = kwargs.get("tools")
+        if _tools:
+            try:
+                _fds = []
+                for _t in _tools:
+                    _fn = _t.get("function", _t) if isinstance(_t, dict) else {}
+                    _fds.append(
+                        types.FunctionDeclaration(
+                            name=_fn.get("name"),
+                            description=_fn.get("description", ""),
+                            parameters=_fn.get("parameters") or {"type": "object", "properties": {}},
+                        )
+                    )
+                generation_config.tools = [types.Tool(function_declarations=_fds)]
+            except Exception:  # fail-open: fall back to text-tag behaviour
+                pass
+
         # Add thinking configuration for models that support it
         if capabilities.supports_extended_thinking and effective_thinking_mode in self.THINKING_BUDGETS:
             # Get model's max thinking tokens and calculate actual budget
@@ -295,8 +314,22 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
                 except (AttributeError, TypeError):
                     pass
 
+            _tool_calls = []
+            try:
+                if response.candidates:
+                    for _part in (response.candidates[0].content.parts or []):
+                        _fc = getattr(_part, "function_call", None)
+                        if _fc and getattr(_fc, "name", None):
+                            _tool_calls.append({"name": _fc.name, "arguments": dict(getattr(_fc, "args", {}) or {})})
+            except Exception:
+                pass
+            try:
+                _text = response.text or ""
+            except Exception:
+                _text = ""
+
             return ModelResponse(
-                content=response.text,
+                content=_text,
                 usage=usage,
                 model_name=resolved_model_name,
                 friendly_name="Gemini",
@@ -306,6 +339,7 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
                     "finish_reason": finish_reason_str,
                     "is_blocked_by_safety": is_blocked_by_safety,
                     "safety_feedback": safety_feedback_details,
+                    "tool_calls": _tool_calls,
                 },
             )
 

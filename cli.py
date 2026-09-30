@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("models", help="capability-aware model catalog [--provider X] [--refresh] [--json] [--all]")
     sub.add_parser("debate", help="executor->reviewers->judge pipeline (args forwarded)")
     sub.add_parser("run", help="headless: run a task or --plan and print the result (args forwarded)")
+    sub.add_parser("mission", help='writer->executor->judge pipeline: pal mission "<goal>" (args forwarded)')
 
     return p
 
@@ -91,6 +92,10 @@ def main(argv: list[str] | None = None) -> int:
         from providers.router import headless
 
         return headless.main(argv[1:])
+    if argv and argv[0] == "mission":
+        from providers.router import mission
+
+        return mission.main(argv[1:])
     args = build_parser().parse_args(argv)
     return args.func(args)
 
