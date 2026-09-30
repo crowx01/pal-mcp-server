@@ -580,6 +580,19 @@ class OpenAICompatibleProvider(ModelProvider):
             # Text + images, use content array format
             messages.append({"role": "user", "content": user_content})
 
+        # Guardrail: redact credentials/PII at the send boundary (fail-open, per-call restore map)
+        from providers.router import guardrail
+
+        messages, _mask_ctx = guardrail.mask_outbound(messages)
+
+        # Headroom: shrink oversized embedded tool output (nmap/nuclei/sqlmap/
+        # HTTP/JSON/log dumps) before the size-guard cap check and send.
+        # Fail-open, canonical-evidence-safe, never touches tool call
+        # arguments — see headroom_adapter.py.
+        from providers.router import headroom_adapter
+
+        messages = headroom_adapter.compress_payload(messages)
+
         # Prepare completion parameters
         # Always disable streaming for OpenRouter
         # MCP doesn't use streaming, and this avoids issues with O3 model access
@@ -622,19 +635,47 @@ class OpenAICompatibleProvider(ModelProvider):
         if use_responses_api:
             # These models require the /v1/responses endpoint for stateful context
             # If it fails, we should not fall back to chat/completions
-            return self._generate_with_responses_endpoint(
-                model_name=resolved_model,
-                messages=messages,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                capabilities=capabilities,
-                **kwargs,
+            return guardrail.guard_response(
+                self._generate_with_responses_endpoint(
+                    model_name=resolved_model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    capabilities=capabilities,
+                    **kwargs,
+                ),
+                _mask_ctx,
             )
 
         # Retry logic with progressive delays
         max_retries = 4  # Total of 4 attempts
         retry_delays = [1, 3, 5, 8]  # Progressive delays: 1s, 3s, 5s, 8s
         attempt_counter = {"value": 0}
+
+        # P1: smart-router hooks (cache lookup, rate-limit, self-heal on retirement)
+        from providers.router import rate_limit, response_cache, self_heal
+
+        provider_key = self.get_provider_type().value
+
+        _cache_files = kwargs.get("_cache_files") or None
+        cache_key = response_cache.make_key(
+            model=resolved_model,
+            tool=kwargs.get("_tool_name", ""),
+            prompt=prompt,
+            files=_cache_files,
+            extra={"temperature": effective_temperature, "system": bool(system_prompt)},
+        )
+        _cached = response_cache.get(cache_key)
+        if _cached is not None:
+            return _cached
+
+        _est = max((len(prompt) + len(system_prompt or "")) // 4, 1)
+        _ds, _reason = rate_limit.should_downshift(provider_key, resolved_model, _est)
+        if _ds:
+            raise RuntimeError(f"rate_limit: {provider_key}/{resolved_model} exceed cap ({_reason})")
+
+        resolved_model = self_heal.resolve(resolved_model)
+        completion_params["model"] = resolved_model
 
         def _attempt() -> ModelResponse:
             attempt_counter["value"] += 1
@@ -657,21 +698,46 @@ class OpenAICompatibleProvider(ModelProvider):
                 },
             )
 
-        try:
+        def _run_once() -> ModelResponse:
             return self._run_with_retries(
                 operation=_attempt,
                 max_attempts=max_retries,
                 delays=retry_delays,
                 log_prefix=f"{self.FRIENDLY_NAME} API ({resolved_model})",
             )
+
+        try:
+            resp = _run_once()
         except Exception as exc:
-            attempts = max(attempt_counter["value"], 1)
-            error_msg = (
-                f"{self.FRIENDLY_NAME} API error for model {resolved_model} after {attempts} attempt"
-                f"{'s' if attempts > 1 else ''}: {exc}"
-            )
-            logging.error(error_msg)
-            raise RuntimeError(error_msg) from exc
+            mig = self_heal.parse_migration(str(exc))
+            if mig and self_heal.is_enabled():
+                dead, new = mig
+                self_heal.record_migration(dead, new, provider=provider_key)
+                logging.warning("self-heal: %s dead → retrying with %s", dead, new)
+                resolved_model = new  # rebind for closure
+                completion_params["model"] = resolved_model
+                try:
+                    resp = _run_once()
+                except Exception as exc2:
+                    attempts = max(attempt_counter["value"], 1)
+                    raise RuntimeError(
+                        f"{self.FRIENDLY_NAME} API error for model {resolved_model} after {attempts} attempt"
+                        f"{'s' if attempts > 1 else ''}: {exc2}"
+                    ) from exc2
+            else:
+                attempts = max(attempt_counter["value"], 1)
+                error_msg = (
+                    f"{self.FRIENDLY_NAME} API error for model {resolved_model} after {attempts} attempt"
+                    f"{'s' if attempts > 1 else ''}: {exc}"
+                )
+                logging.error(error_msg)
+                raise RuntimeError(error_msg) from exc
+
+        usage = getattr(resp, "usage", None) or {}
+        rate_limit.record(provider_key, resolved_model, usage.get("total_tokens", _est))
+        resp = guardrail.guard_response(resp, _mask_ctx)
+        response_cache.put(cache_key, resp)
+        return resp
 
     def validate_parameters(self, model_name: str, temperature: float, **kwargs) -> None:
         """Validate model parameters.

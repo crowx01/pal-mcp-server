@@ -192,6 +192,28 @@ def clear_model_restriction_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolate_router_state(monkeypatch, tmp_path):
+    """Provider-level tests mock the HTTP client and assert it was called;
+    the P1 smart-router hooks (response_cache, rate_limit, self_heal) wired
+    into generate_content are process-global and disk-backed, so a cache hit
+    or rate-limit cap from an earlier test would silently short-circuit a
+    later test's mock. Point them at a throwaway dir / clear state per test.
+    Dedicated router unit tests (test_response_cache.py etc.) opt back in by
+    setting their own env explicitly.
+    """
+    from providers.router import rate_limit, response_cache, self_heal
+
+    monkeypatch.setattr(response_cache, "CACHE_DIR", tmp_path / "pal_cache")
+    with response_cache._LOCK:
+        response_cache._MEM.clear()
+    with rate_limit._LOCK:
+        rate_limit._BUCKETS.clear()
+    self_heal._ALIAS_MAP.clear()
+    self_heal._PROVISIONAL.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def disable_force_env_override(monkeypatch):
     """Default tests to runtime environment visibility unless they explicitly opt in."""
 

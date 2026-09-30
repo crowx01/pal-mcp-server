@@ -11,3 +11,4 @@ importlib-resources>=5.0.0; python_version<"3.9"
 # pytest-mock>=3.11.0
 
 rich>=13.0
+prompt_toolkit>=3.0.43  # pal chat: history nav (Up/Down, Ctrl-P/Ctrl-N), multiline draft preservation

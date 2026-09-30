@@ -133,20 +133,20 @@ class Toolbelt:
         try:
             self._log_path.parent.mkdir(parents=True, exist_ok=True)
             with self._log_path.open("a", encoding="utf-8") as fp:
-                fp.write(
-                    json.dumps(
-                        {
-                            "ts": time.time(),
-                            "model": model,
-                            "tool": tool,
-                            "args": args,
-                            "result_head": (result or "")[:400],
-                            "duration_s": round(dur, 3),
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                from providers.router import guardrail
+
+                line = json.dumps(
+                    {
+                        "ts": time.time(),
+                        "model": model,
+                        "tool": tool,
+                        "args": args,
+                        "result_head": (result or "")[:400],
+                        "duration_s": round(dur, 3),
+                    },
+                    ensure_ascii=False,
                 )
+                fp.write(guardrail.redact_text(line) + "\n")
         except OSError as exc:
             log.debug("audit log write failed: %s", exc)
 

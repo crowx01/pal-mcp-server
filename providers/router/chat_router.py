@@ -57,8 +57,24 @@ def first_available(candidates, is_available) -> str | None:
 
 
 def _resolve(is_available):
-    cheap = os.getenv("PAL_CHAT_CHEAP_MODEL") or first_available(CHEAP_TIER, is_available)
-    smart = os.getenv("PAL_CHAT_SMART_MODEL") or first_available(SMART_TIER, is_available)
+    """Env override > capability catalog > legacy name list.
+
+    The catalog decides eligibility from capability flags (quality floor for
+    smart, cost tier for cheap); CHEAP_TIER/SMART_TIER only break ties and are
+    the fallback when the catalog is empty or disabled.
+    """
+    from providers.router import catalog
+
+    cheap = (
+        os.getenv("PAL_CHAT_CHEAP_MODEL")
+        or catalog.pick_tier("cheap", is_available, priors=CHEAP_TIER)
+        or first_available(CHEAP_TIER, is_available)
+    )
+    smart = (
+        os.getenv("PAL_CHAT_SMART_MODEL")
+        or catalog.pick_tier("smart", is_available, priors=SMART_TIER)
+        or first_available(SMART_TIER, is_available)
+    )
     return cheap, smart
 
 

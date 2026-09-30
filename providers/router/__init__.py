@@ -9,8 +9,10 @@ Phase 4: tooling/ (MCP-in-MCP proxy) + clink client coverage.
 from providers.router import (  # noqa: F401
     bandit,
     classifier,
+    dispatch,
     episode_store,
     fallback_chain,
+    guardrail,
     health_probe,
     lesson_store,
     quota_probe,
@@ -27,6 +29,7 @@ from providers.router import (  # noqa: F401
 __all__ = [
     "bandit",
     "classifier",
+    "dispatch",
     "episode_store",
     "fallback_chain",
     "health_probe",

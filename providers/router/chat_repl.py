@@ -26,6 +26,18 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.enums import EditingMode
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    from providers.router import chat_history
+
+    _PT_OK = True
+except ImportError:  # pragma: no cover - degrade to plain input if not installed
+    _PT_OK = False
+
 console = Console()
 
 # one specific role (system instruction) per command, so each behaves for its job
@@ -124,14 +136,23 @@ async def _ask(handle, prompt: str, model: str, cwd: str, cont: str | None, role
 async def _ask_direct(model: str, prompt: str, system: str = ""):
     """Call the provider directly (no chat tool), so no workflow 'files_required'
     envelope and no response-blocking. Used for the debate verdict phase.
-    """
-    from providers.registry import ModelProviderRegistry
 
-    prov = ModelProviderRegistry.get_provider_for_model(model)
-    if prov is None:
-        return f"__ERROR__no provider for {model}"
+    Routed through providers.router.dispatch: same size-guard reroute /
+    fallback-chain / refusal+episode recording as the MCP tool path, just
+    without the chat tool's blocking envelope.
+    """
+    from providers.router import dispatch
+
     try:
-        resp = await asyncio.to_thread(prov.generate_content, prompt, model, system or None, 0.3)
+        resp = await asyncio.to_thread(
+            dispatch.generate,
+            model,
+            prompt,
+            system or None,
+            temperature=0.3,
+            category="debate",
+            tool="debate",
+        )
         return _clean(getattr(resp, "content", "") or "")
     except Exception as exc:
         return f"__ERROR__{type(exc).__name__}: {str(exc)[:200]}"
@@ -236,6 +257,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     Returns (final_answer, transcript) where transcript is [(tool, args, result)].
     """
     from providers.registry import ModelProviderRegistry
+    from providers.router import dispatch
     from providers.tooling import react
 
     tb = _ensure_toolbelt()
@@ -264,7 +286,15 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 tail = convo[-(budget * 3 // 4):]
                 convo = head + "\n\n…[older tool output trimmed to fit token limit]…\n\n" + tail
             try:
-                resp = await asyncio.to_thread(prov.generate_content, convo, model, system, 0.2)
+                resp = await asyncio.to_thread(
+                    dispatch.generate,
+                    model,
+                    convo,
+                    system,
+                    temperature=0.2,
+                    category="tools",
+                    tool="tools",
+                )
                 text = getattr(resp, "content", "") or ""
             except Exception as exc:
                 return (f"__ERROR__{type(exc).__name__}: {str(exc)[:200]}", transcript)
@@ -295,6 +325,31 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 os.environ["PAL_BASH_UNRESTRICTED"] = prev_flag
 
 
+async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int = 5, *, full: bool = False):
+    """Phase 6: try each model in ``pool`` in order until one returns a clean
+    (non-error, non-refusal) answer -- fallover across the whole tool-capable
+    model pool, not just retries within one provider (fallback_chain still
+    handles that underneath each individual call). Qwen is no longer the
+    sole/privileged tool executor; it's just one candidate in the pool.
+
+    Returns (answer, transcript, model_used).
+    """
+    from providers.router import refusal_memory
+
+    last_ans, last_transcript = "__ERROR__no tool-capable model available", []
+    last_model = pool[0] if pool else None
+    for model in pool or []:
+        ans, transcript = await _tools_loop(task, model, cwd, max_steps=max_steps, full=full)
+        last_ans, last_transcript, last_model = ans, transcript, model
+        if ans.startswith("__ERROR__"):
+            continue
+        tag = refusal_memory.classify(ans)
+        if tag and tag.startswith("refusal:"):
+            continue
+        return ans, transcript, model
+    return last_ans, last_transcript, last_model
+
+
 def _bubble(model: str, answer: str, *, role: str = "pal", color: str = "green") -> Panel:
     if answer.startswith("__ERROR__"):
         body: object = Text(answer[len("__ERROR__"):], style="red")
@@ -303,6 +358,75 @@ def _bubble(model: str, answer: str, *, role: str = "pal", color: str = "green")
         body = Markdown(answer)
     title = Text.assemble((role, f"bold {color}"), (f"  ·  {model}", "dim"))
     return Panel(body, title=title, title_align="left", border_style=color, padding=(0, 1))
+
+
+def _build_prompt_session(session_id: str) -> PromptSession:
+    """Claude-Code-like input: multiline buffer, Up/Down do visual-line nav
+    within the draft and only fall through to history at the first/last
+    line (prompt_toolkit's Buffer.auto_up/auto_down -- built in, not
+    reimplemented here), Ctrl-P/Ctrl-N are unconditional history-prev/next
+    the way readline's emacs mode does it, and the in-progress draft is
+    preserved exactly: prompt_toolkit's Buffer keeps the not-yet-submitted
+    line as a trailing "working line" in its history index, so paging back
+    out past the oldest recalled entry (or forward past the newest) restores
+    it byte-for-byte rather than clearing it.
+    """
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _submit(event):
+        event.current_buffer.validate_and_handle()
+
+    @kb.add("escape", "enter")  # Alt+Enter: insert a literal newline
+    def _newline_alt(event):
+        event.current_buffer.insert_text("\n")
+
+    @kb.add("c-j")  # Ctrl-J: same, for terminals that eat Alt+Enter
+    def _newline_ctrl_j(event):
+        event.current_buffer.insert_text("\n")
+
+    @kb.add("c-p")  # unconditional prev, regardless of cursor line
+    def _hist_prev(event):
+        event.current_buffer.history_backward()
+
+    @kb.add("c-n")  # unconditional next, regardless of cursor line
+    def _hist_next(event):
+        event.current_buffer.history_forward()
+
+    return PromptSession(
+        history=chat_history.JsonlSessionHistory(session_id),
+        multiline=True,
+        key_bindings=kb,
+        editing_mode=EditingMode.EMACS,
+        enable_history_search=False,  # keep plain Up/Down/Ctrl-P/Ctrl-N semantics
+    )
+
+
+async def _read_line(session, cwd: str) -> str:
+    """Read one submitted line, preferring the prompt_toolkit session (rich
+    history/multiline UX); fall back to plain rich input if prompt_toolkit
+    isn't installed or stdin isn't a real TTY (pipes, CI, `pal run`-style
+    non-interactive callers never hit this path anyway).
+    """
+    if session is not None:
+        with patch_stdout():
+            text = await session.prompt_async([("class:prompt", "you › ")])
+        return text.strip()
+    return (await asyncio.to_thread(console.input, "[bold]you[/] › ")).strip()
+
+
+def _models_table() -> str:
+    """Render the capability catalog for the /models chat command -- same
+    data as `pal models`, without shelling out.
+    """
+    import logging as _logging
+
+    from providers.router import catalog, catalog_cli
+
+    _logging.disable(_logging.WARNING)
+    cat = catalog.build(refresh=False, discover=True, include_unavailable=False)
+    entries = [e for e in cat.entries if e.source != "discovered"]
+    return catalog_cli.render(cat, entries, len(cat.entries) - len(entries))
 
 
 def _header(cheap: str | None, smart: str | None) -> Panel:
@@ -320,7 +444,14 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
             "/agent[:edit|:plan|:review] <task> (full Claude Code) · /debate · /delegate <model>",
             style="dim",
         ),
-        Text("/smart · /cheap · /model · /help · /exit", style="dim"),
+        Text(
+            "/models (capability catalog) · /smart · /cheap · /model · /help · /exit",
+            style="dim",
+        ),
+        Text(
+            "Enter sends · Alt+Enter/Ctrl-J newline · ↑/↓ history (line-aware in multiline) · Ctrl-P/Ctrl-N history",
+            style="dim",
+        ),
     )
     return Panel(lines, border_style="cyan", padding=(0, 1))
 
@@ -335,9 +466,17 @@ async def _run(handle):
     r0 = chat_router.route("hi", _is_available)
     console.print(_header(r0["cheap"], r0["smart"]))
 
+    session = None
+    if _PT_OK:
+        try:
+            session_id = chat_history.new_session_id()
+            session = _build_prompt_session(session_id)
+        except Exception:
+            session = None  # e.g. no real TTY -- fall back to plain input
+
     while True:
         try:
-            line = (await asyncio.to_thread(console.input, "[bold]you[/] › ")).strip()
+            line = await _read_line(session, cwd)
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]bye[/]")
             return 0
@@ -354,6 +493,17 @@ async def _run(handle):
         if low == "/model":
             r = chat_router.route("hi", _is_available)
             console.print(f"[dim]cheap=[green]{r['cheap']}[/]  smart=[magenta]{r['smart']}[/][/]")
+            continue
+        if low == "/models":
+            with console.status("[dim]building model catalog…[/]", spinner="dots"):
+                try:
+                    table = await asyncio.to_thread(_models_table)
+                except Exception as exc:
+                    table = f"__ERROR__{type(exc).__name__}: {str(exc)[:200]}"
+            if table.startswith("__ERROR__"):
+                console.print(f"[red]{table[len('__ERROR__'):]}[/]")
+            else:
+                console.print(Panel(Text(table), title="models", border_style="cyan", padding=(0, 1)))
             continue
 
         # /delegate <model> <question>
@@ -410,12 +560,17 @@ async def _run(handle):
             if not task:
                 console.print("[dim]usage: /tools <task> (full: any command — nmap, burpsuite, …) · /tools:ro <task> (read-only)[/]")
                 continue
+            from providers.router import tools_pool
+
             r = chat_router.route(task, _is_available)
-            # tool-use needs a model that emits clean <tool_call>. gpt-oss trips
-            # Groq's output parser, so prefer qwen when present. Override with env.
-            tmodel = os.getenv("PAL_CHAT_TOOLS_MODEL")
-            if not tmodel:
-                tmodel = "qwen3" if _is_available("qwen3") else r["model"]
+            # Phase 6: a filtered, bandit-ordered pool of tool-capable models
+            # (capability + availability + refusal + rate + context +
+            # blocklist), not one hardcoded name. PAL_TOOLS_MODELS /
+            # PAL_TOOLS_PRIMARY_MODEL / PAL_TOOLS_FALLBACK_MODELS override it.
+            pool = tools_pool.select_pool("tool_executor", task, is_available=_is_available)
+            if not pool:
+                pool = [r["model"]] if r["model"] else []
+            tmodel = pool[0] if pool else None
             if not tmodel:
                 console.print("[red]no model available — check `pal diag`[/]")
                 continue
@@ -431,16 +586,18 @@ async def _run(handle):
                 ))
                 tools_full_warned = True
             mode = "full: any command" if full else "read-only: bash·read_file·write_file·web_fetch·gh"
-            console.print(f"[dim]→ {tmodel} with Kali tools ({mode})[/]")
+            console.print(f"[dim]→ pool: {', '.join(pool)} ({mode})[/]")
             with console.status(f"[dim]{tmodel} using tools{'' if full else ' (read-only)'}…[/]", spinner="dots"):
-                ans, transcript = await _tools_loop(task, tmodel, cwd, max_steps=8 if full else 5, full=full)
+                ans, transcript, used_model = await _tools_loop_pool(
+                    task, pool, cwd, max_steps=8 if full else 5, full=full
+                )
             blocked = False
             for name, args, _res in transcript:
                 shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
                 console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
                 if "read-only allowlist" in (_res or ""):
                     blocked = True
-            console.print(_bubble(f"{tmodel} · tools{':ro' if not full else ''}", ans, role="tools", color="cyan"))
+            console.print(_bubble(f"{used_model} · tools{':ro' if not full else ''}", ans, role="tools", color="cyan"))
             if blocked and not full:
                 console.print(f"[yellow]↳ blocked in read-only. Retry as [bold]/tools {task}[/] (full).[/]")
             continue
@@ -451,25 +608,42 @@ async def _run(handle):
             if not q:
                 console.print("[dim]usage: /debate <question>  — a reader gathers the files, then the panel decides[/]")
                 continue
-            # phase 1: a tool-capable model reads the relevant files -> a digest
-            reader = os.getenv("PAL_CHAT_TOOLS_MODEL") or ("qwen3" if _is_available("qwen3") else None)
+            # phase 1: a tool-capable model reads the relevant files -> a digest.
+            # Phase 6: reviewer role pool, not a single hardcoded qwen3 reader.
+            from providers.router import tools_pool
+
+            reader_pool = tools_pool.select_pool("reviewer", q, is_available=_is_available)
             digest = ""
-            if reader:
+            if reader_pool:
                 gather = (
                     f"Read the files in the current directory relevant to this question: {q}\n"
                     "Use read_file / bash (ls, cat, grep) to gather the key facts and code. "
                     "Then output a concise factual digest (<=250 words) of what's there. "
                     "Do NOT give a verdict yet — just the evidence."
                 )
-                with console.status(f"[dim]{reader} reading files in {cwd}…[/]", spinner="dots"):
-                    digest, transcript = await _tools_loop(gather, reader, cwd, max_steps=6, full=False)
+                with console.status(f"[dim]{reader_pool[0]} reading files in {cwd}…[/]", spinner="dots"):
+                    digest, transcript, reader = await _tools_loop_pool(
+                        gather, reader_pool, cwd, max_steps=6, full=False
+                    )
                 for name, args, _res in transcript:
                     shown = args.get("command") or args.get("path") or ""
                     console.print(f"[dim]  read · {name}: {str(shown)[:60]}[/]")
             else:
                 console.print("[dim](no tool-capable reader available; debating without file context)[/]")
-            # phase 2: the panel debates, grounded in that digest (plain calls)
-            panel = [m for m in dict.fromkeys(["gpt-oss-120b", "qwen3", "gpt-oss-20b"]) if _is_available(m)]
+            # Headroom: the digest gets re-sent verbatim to every panel member below;
+            # bound it once here instead of paying the token cost N times. Fail-open,
+            # canonical-evidence-safe — see headroom_adapter.py.
+            from providers.router import headroom_adapter
+
+            if digest:
+                digest = headroom_adapter.compress_tool_result(digest, tool_name="debate_digest")
+            # phase 2: the panel debates, grounded in that digest (plain calls).
+            # reasoner-role pool first (capability/availability/refusal/rate
+            # filtered), falling back to the legacy fixed trio so a debate
+            # never comes up empty.
+            reasoner_pool = tools_pool.select_pool("reasoner", q, is_available=_is_available)
+            legacy_panel = [m for m in ("gpt-oss-120b", "qwen3", "gpt-oss-20b") if _is_available(m)]
+            panel = list(dict.fromkeys(reasoner_pool[:3] + legacy_panel))[:3] or legacy_panel
             console.print(f"[dim]debate across {', '.join(panel)}[/]")
             sys = _maybe_security(q, (
                 "You are one voice in a technical debate. Base your answer on the file "

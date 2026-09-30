@@ -823,6 +823,14 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
                 if pal_cat and pal_cat in classifier.CATEGORY_PREFERENCES:
                     logger.info(f"PAL classifier picked category '{pal_cat}' for {name}")
                     candidates = list(classifier.CATEGORY_PREFERENCES[pal_cat])
+                    # Phase-5: capability filter over the catalog; the name list
+                    # above is only the tie-break prior. [] -> keep legacy list.
+                    try:
+                        from providers.router import catalog
+
+                        candidates = catalog.order_for_category(pal_cat, candidates) or candidates
+                    except Exception as _cexc:
+                        logger.debug(f"catalog routing degraded to name list: {_cexc}")
                 cat_tag = pal_cat or tool_category.value
                 # Phase-1 bandit: reorder by observed success (reversible, in-session;
                 # never drops a candidate -> exploration floor preserved).
@@ -930,6 +938,8 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[TextCon
             _is_refusal = bool(tag and tag.startswith("refusal:"))
             if _is_refusal:
                 refusal_memory.record(model_name, _pal_cat, tag)
+            else:
+                refusal_memory.record_success(model_name, _pal_cat)
             # Phase-1 learning substrate: persist the outcome episode.
             episode_store.record(
                 model_name,

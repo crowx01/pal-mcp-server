@@ -154,6 +154,19 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
         else:
             full_prompt = prompt
 
+        # Guardrail: redact credentials/PII at the send boundary (fail-open, per-call restore map)
+        from providers.router import guardrail
+
+        full_prompt, _mask_ctx = guardrail.mask_outbound(full_prompt)
+
+        # Headroom: shrink oversized embedded tool output (nmap/nuclei/sqlmap/
+        # HTTP/JSON/log dumps) before the size-guard cap check and send.
+        # Fail-open, canonical-evidence-safe — see headroom_adapter.py.
+        from providers.router import headroom_adapter
+
+        # Structured scanner/HTTP/JSON output only: system prompt and prose must
+        # reach the model verbatim (log/text summarisers are skipped).
+        full_prompt = headroom_adapter.compress_tool_result(full_prompt, structured_only=True)
         parts.append({"text": full_prompt})
 
         # Add images if provided and model supports vision
@@ -351,6 +364,7 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
 
         usage = getattr(resp, "usage", {}) or {}
         rate_limit.record("google", resolved_model_name, usage.get("total_tokens", _est))
+        resp = guardrail.guard_response(resp, _mask_ctx)
         response_cache.put(cache_key, resp)
         return resp
 

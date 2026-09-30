@@ -62,3 +62,35 @@ def test_diag_survives_toolbelt_failure(monkeypatch):
     monkeypatch.setattr(tb, "is_enabled", lambda: (_ for _ in ()).throw(ImportError("no openai")))
     data = diag.collect()
     assert "toolbelt" in data  # degraded, not crashed
+
+
+def test_diag_has_phase11_sections():
+    data = diag.collect()
+    for k in ("quota", "breaker", "fallback", "size_guard", "guardrail", "headroom", "catalog", "tool_pool", "debate"):
+        assert k in data
+    for f in ("PAL_FALLBACK", "PAL_GUARDRAIL", "PAL_HEADROOM", "PAL_DEBATE"):
+        assert f in data["flags"]
+
+
+def test_diag_scrub_redacts_secrets_and_long_text():
+    out = diag._scrub(
+        {
+            "api_key": "abc",
+            "restore_map": {"<EMAIL_1>": "a@b.c"},
+            "raw_prompt": "hello",
+            "note": "sk-abcdef1234567890 and Bearer xyz",
+            "tpm_used": 5,
+            "long": "x" * 500,
+        }
+    )
+    assert out["api_key"] == out["restore_map"] == out["raw_prompt"] == "<redacted>"
+    assert "sk-abcdef" not in out["note"] and "xyz" not in out["note"]
+    assert out["tpm_used"] == 5
+    assert len(out["long"]) < 300
+
+
+def test_diag_output_has_no_env_secrets(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-SECRETSECRET12345678")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSySECRETSECRETSECRETSECRET1")
+    blob = diag.render(diag.collect()) + json.dumps(diag.collect(), default=str)
+    assert "SECRETSECRET" not in blob

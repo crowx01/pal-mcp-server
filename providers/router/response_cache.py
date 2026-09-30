@@ -93,8 +93,12 @@ def get(key: str):
             _MEM[key] = (expiry, value)
             _STATS["hits"] += 1
         return value
-    except (OSError, pickle.UnpicklingError) as exc:
+    except (OSError, EOFError, pickle.UnpicklingError, ValueError, AttributeError) as exc:
+        # Corrupt/partial/incompatible pickle (e.g. truncated by a killed
+        # process) must never crash the caller — treat as a miss and drop
+        # the bad file so it doesn't fail again on the next lookup.
         log.debug("cache disk miss %s: %s", key[:8], exc)
+        p.unlink(missing_ok=True)
         with _LOCK:
             _STATS["misses"] += 1
         return None
