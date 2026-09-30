@@ -1,103 +1,118 @@
+"""Generic loader for extra OpenAI-compatible providers from ~/.pal/keys.json.
+
+Any entry whose ``status`` starts with "WORKING", that has a ``base`` URL and an
+explicit ``models`` list, and whose name is not already natively wired, is
+registered as an OpenAI-compatible provider that claims ONLY its listed models
+(a strict allowlist, so it never shadows other providers). Each is inserted into
+the registry priority order before Cohere/HuggingFace/OpenRouter so it wins for
+its own models. Robust: one bad entry never breaks startup.
+"""
+
+from __future__ import annotations
+
 import json
+import logging
 import os
 
-from __main__ import *
-
-try:
-    import aenum
-except ImportError:
-    aenum = None
-
-from providers.base import ModelCapabilities, ProviderType, RangeTemperatureConstraint
 from providers.openai_compatible import OpenAICompatibleProvider
+from providers.shared import ModelCapabilities, ProviderType, RangeTemperatureConstraint
+
+log = logging.getLogger(__name__)
+
+_NATIVE = {"openrouter", "gemini", "groq", "openai", "custom", "huggingface", "cohere", "glm"}
 
 
-def register_extras(registry):
-    keys_path = os.path.expanduser('~/.pal/keys.json')
-    if not os.path.exists(keys_path):
-        return
+def _ensure_provider_type(name: str) -> ProviderType:
+    """Return a ProviderType member for ``name``, extending the enum if needed."""
+    key = name.upper()
+    if key in ProviderType.__members__:
+        return ProviderType[key]
     try:
-        with open(keys_path) as f:
-            data = json.load(f)
+        from aenum import extend_enum
+
+        extend_enum(ProviderType, key, name.lower())
+        return ProviderType[key]
     except Exception:
+        # Fallback: inject directly into the enum maps.
+        member = object.__new__(ProviderType)
+        member._name_ = key
+        member._value_ = name.lower()
+        ProviderType._member_map_[key] = member
+        ProviderType._value2member_map_[name.lower()] = member
+        return member
+
+
+def _make_provider(base_url, friendly, ptype, allow, api_key):
+    """Factory so each provider binds ITS OWN values (avoids loop-closure bugs)."""
+
+    class _Extra(OpenAICompatibleProvider):
+        FRIENDLY_NAME = friendly
+
+        def __init__(self, api_key=None, **kw):
+            super().__init__(api_key or api_key_default, base_url=base_url, **kw)
+
+        def get_provider_type(self):
+            return ptype
+
+        def validate_model_name(self, model_name: str) -> bool:
+            return model_name in allow
+
+        def _lookup_capabilities(self, canonical_name, requested_name=None):
+            if canonical_name in allow:
+                cap = ModelCapabilities(
+                    provider=ptype, model_name=canonical_name, friendly_name=friendly,
+                    intelligence_score=9, context_window=128_000, max_output_tokens=4_096,
+                    supports_extended_thinking=False, supports_system_prompts=True,
+                    supports_streaming=True, supports_function_calling=True,
+                    temperature_constraint=RangeTemperatureConstraint(0.0, 2.0, 1.0),
+                )
+                cap._is_generic = True
+                return cap
+            return None
+
+    api_key_default = api_key
+    return _Extra
+
+
+def register_extras(registry) -> None:
+    kf = os.path.expanduser("~/.pal/keys.json")
+    try:
+        data = json.load(open(kf, encoding="utf-8"))
+    except Exception as exc:
+        log.debug("extra_providers: cannot read %s: %s", kf, exc)
         return
 
-    skip_names = {'openrouter', 'gemini', 'groq', 'openai', 'custom', 'huggingface', 'cohere', 'glm'}
+    insert_before = [ProviderType.OPENROUTER]
+    for nm in ("COHERE", "HUGGINGFACE"):
+        if nm in ProviderType.__members__:
+            insert_before.append(ProviderType[nm])
 
     for name, info in data.items():
-        if name.lower() in skip_names:
-            continue
-        if not isinstance(info, dict):
-            continue
-        base = info.get('base')
-        status = info.get('status', '')
-        if not base or not status.startswith('WORKING'):
-            continue
-        keys = info.get('keys', [])
-        if not keys:
-            continue
-        api_key = keys[0]
+        try:
+            if name.lower() in _NATIVE:
+                continue
+            base = (info or {}).get("base")
+            status = (info or {}).get("status", "")
+            models = [m for m in ((info or {}).get("models") or []) if m]
+            keys = [k for k in ((info or {}).get("keys") or []) if k]
+            if not base or not status.startswith("WORKING") or not models or not keys:
+                continue
 
-        upper_name = name.upper()
-        lower_name = name.lower()
-
-        # 3. Extend ProviderType Enum dynamically
-        if not hasattr(ProviderType, upper_name):
-            if aenum and hasattr(aenum, 'extend_enum'):
-                try:
-                    aenum.extend_enum(ProviderType, upper_name, lower_name)
-                except Exception:
-                    pass
-            if not hasattr(ProviderType, upper_name):
-                try:
-                    ProviderType._member_map_[upper_name] = lower_name
-                    ProviderType._value2member_map_[lower_name] = getattr(ProviderType, upper_name, None) or object()
-                    # Actually assign as attribute to the Enum class if possible
-                    setattr(ProviderType, upper_name, lower_name)
-                except Exception:
-                    pass
-
-        p_type = getattr(ProviderType, upper_name, lower_name)
-
-        # Create dynamic provider class
-        class DynamicOpenAIProvider(OpenAICompatibleProvider):
-            FRIENDLY_NAME = name
-            def __init__(self, key=None):
-                super().__init__(api_key=api_key)
-                self.base_url = base
-
-            @classmethod
-            def get_provider_type(cls):
-                return p_type
-
-            def _lookup_capabilities(self, model_name: str) -> ModelCapabilities:
-                return ModelCapabilities(
-                    intelligence_score=9,
-                    context_window=128000,
-                    max_output_tokens=4096,
-                    supports_system_prompts=True,
-                    supports_streaming=True,
-                    supports_function_calling=True,
-                    temperature_constraint=RangeTemperatureConstraint(0, 2, 1)
-                )
-
-            def validate_model(self, model_name: str) -> bool:
-                return bool(model_name)
-
-        instance = DynamicOpenAIProvider()
-        # Register provider class and instance
-        registry.register_provider(p_type, DynamicOpenAIProvider)
-        if hasattr(registry, 'register_instance'):
-            registry.register_instance(p_type, instance)
-        if hasattr(registry, '_instances'):
-            registry._instances[p_type] = instance
-
-        # Insert into PROVIDER_PRIORITY_ORDER before OPENROUTER
-        if hasattr(registry, 'PROVIDER_PRIORITY_ORDER'):
-            if p_type in registry.PROVIDER_PRIORITY_ORDER:
-                registry.PROVIDER_PRIORITY_ORDER.remove(p_type)
-            if ProviderType.OPENROUTER in registry.PROVIDER_PRIORITY_ORDER:
-                idx = registry.PROVIDER_PRIORITY_ORDER.index(ProviderType.OPENROUTER)
-                registry.PROVIDER_PRIORITY_ORDER.insert(idx, p_type)
-            else:
-                registry.PROVIDER_PRIORITY_ORDER.insert(0, p_type)
+            p_type = _ensure_provider_type(name)
+            klass = _make_provider(base, name.title(), p_type, set(models), keys[0])
+            registry.register_provider(p_type, klass)
+            # Pre-build the instance (key baked in) so get_provider returns it
+            # directly without needing a *_API_KEY env mapping.
+            try:
+                registry()._initialized_providers[p_type] = klass(keys[0])
+            except Exception as _e:
+                log.debug("extra_providers: could not pre-init %s: %s", name, _e)
+            order = getattr(registry, "PROVIDER_PRIORITY_ORDER", None)
+            if isinstance(order, list):
+                if p_type in order:
+                    order.remove(p_type)
+                idxs = [order.index(t) for t in insert_before if t in order]
+                order.insert(min(idxs) if idxs else 0, p_type)
+            log.debug("extra_providers: registered %s for %s", name, sorted(models))
+        except Exception as exc:
+            log.debug("extra_providers: skipped %s: %s", name, exc)
