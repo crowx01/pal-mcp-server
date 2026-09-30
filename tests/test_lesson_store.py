@@ -41,7 +41,8 @@ def _routing(**kw):
 
 
 # ----- origin-channel authentication -----------------------------------------
-def test_unknown_teacher_rejected():
+def test_unknown_teacher_rejected(monkeypatch):
+    monkeypatch.setenv("PAL_LEARN_AUTO", "0")  # strict teacher gate only when auto-learn is off
     with pytest.raises(ls.LessonRejected):
         ls.emit_lesson("attacker", "routing", "x", category="c", target_model="m",
                        provenance=["p"])

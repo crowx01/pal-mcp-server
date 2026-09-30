@@ -75,6 +75,8 @@ def _make_provider(base_url, friendly, ptype, allow, api_key):
 
 
 def register_extras(registry) -> None:
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return  # inert during tests to avoid catalog pollution
     kf = os.path.expanduser("~/.pal/keys.json")
     try:
         data = json.load(open(kf, encoding="utf-8"))

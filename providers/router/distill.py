@@ -209,8 +209,7 @@ def build_proposal(
         "categories": categories,
         "apply_hint": (
             "HUMAN-GATED: review, then hand-edit classifier.CATEGORY_PREFERENCES "
-            "or open a PR. Auto-apply is "
-            + ("ENABLED (PAL_LEARN_AUTO)." if os.getenv("PAL_LEARN_AUTO","1").lower() not in ("0","false","no") else "off; a human applies this.")
+            "or open a PR. This proposal is never auto-applied."
         ),
     }
 
