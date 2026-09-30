@@ -1,20 +1,23 @@
-from __main__ import * 
-import os, json
-from enum import Enum
+import json
+import os
+
+from __main__ import *
+
 try:
     import aenum
 except ImportError:
     aenum = None
 
-from providers.base import ProviderType, ModelCapabilities, RangeTemperatureConstraint
+from providers.base import ModelCapabilities, ProviderType, RangeTemperatureConstraint
 from providers.openai_compatible import OpenAICompatibleProvider
+
 
 def register_extras(registry):
     keys_path = os.path.expanduser('~/.pal/keys.json')
     if not os.path.exists(keys_path):
         return
     try:
-        with open(keys_path, 'r') as f:
+        with open(keys_path) as f:
             data = json.load(f)
     except Exception:
         return

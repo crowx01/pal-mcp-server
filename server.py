@@ -545,6 +545,13 @@ def configure_providers():
         registered_providers.append(ProviderType.HUGGINGFACE.value)
         logger.debug(f"Registered provider: {ProviderType.HUGGINGFACE.value}")
 
+    try:
+        from providers.extra_providers import register_extras
+
+        register_extras(ModelProviderRegistry)
+    except Exception as _e:
+        logger.debug(f"extra_providers skipped: {_e}")
+
     cohere_key = get_env("COHERE_API_KEY")
     if cohere_key and cohere_key != "your_cohere_api_key_here":
         from providers.cohere import CohereProvider
