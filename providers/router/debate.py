@@ -180,6 +180,26 @@ def _norm_criteria(items: Any) -> list[dict]:
     return out
 
 
+def _apply_pinned(pinned: list[dict], reported: Any) -> list[dict]:
+    """Project a model's reported criteria onto the orchestrator-pinned contract.
+    Ids/text come only from ``pinned``; the model may only supply ``verified`` +
+    ``evidence`` for a pinned id. Added, renamed, reworded or dropped criteria
+    are ignored (a dropped one simply stays unverified)."""
+    got = {c["id"]: c for c in _norm_criteria(reported)}
+    out = []
+    for p in pinned:
+        r = got.get(p["id"])
+        out.append(
+            {
+                "id": p["id"],
+                "text": p["text"],
+                "verified": bool(r and r["verified"]),
+                "evidence": r["evidence"] if r else "",
+            }
+        )
+    return out
+
+
 def _extract_json(text: str) -> dict | None:
     """Lenient: whole string, ```json fence, or first balanced {...} span."""
     text = (text or "").strip()
@@ -201,13 +221,24 @@ def _extract_json(text: str) -> dict | None:
 
 
 def parse_handoff(
-    text: str, *, mission_id: str, iteration: int, stage: str, model: str, role: str, objective: str
+    text: str,
+    *,
+    mission_id: str,
+    iteration: int,
+    stage: str,
+    model: str,
+    role: str,
+    objective: str,
+    pinned: list[dict] | None = None,
 ) -> Handoff:
     """Parse model output into a Handoff. Identity fields are forced to the
     orchestrator's values (a model cannot spoof mission/stage/model). Unparseable
-    output yields a blocked handoff carrying the raw text as evidence."""
+    output yields a blocked handoff carrying the raw text as evidence. When
+    ``pinned`` is given, completion_criteria is forced to the pinned contract."""
     obj = _extract_json(text)
     h = Handoff(mission_id=mission_id, iteration=iteration, stage=stage, model=model, role=role, objective=objective)
+    if pinned is not None:
+        h.completion_criteria = _apply_pinned(pinned, [])
     if obj is None:
         h.completion_status = "blocked"
         h.evidence = [f"unparseable_output: {(text or '')[:800]}"]
@@ -222,7 +253,11 @@ def parse_handoff(
         if k in _LIST_FIELDS:
             v = v if isinstance(v, list) else [v]
         setattr(h, k, v)
-    h.completion_criteria = _norm_criteria(h.completion_criteria)
+    h.completion_criteria = (
+        _apply_pinned(pinned, obj.get("completion_criteria"))
+        if pinned is not None
+        else _norm_criteria(h.completion_criteria)
+    )
     if h.completion_status not in STATUSES:
         h.completion_status = "in_progress"
     try:
@@ -234,8 +269,12 @@ def parse_handoff(
 
 
 # ── judge contract ───────────────────────────────────────────────────────
-def enforce_judge(verdict: str, state: Handoff, judge: Handoff) -> tuple[str, list[str]]:
-    """Return (final_verdict, reasons). COMPLETE only if every gate passes."""
+def enforce_judge(
+    verdict: str, state: Handoff, judge: Handoff, pinned: list[dict] | None = None
+) -> tuple[str, list[str]]:
+    """Return (final_verdict, reasons). COMPLETE only if every gate passes.
+    With ``pinned``, the judge is evaluated strictly against the original
+    criteria: only the judge's verification of those ids counts."""
     verdict = (verdict or "").strip().upper()
     if verdict not in ("COMPLETE", "CONTINUE"):
         return "CONTINUE", [f"invalid_verdict:{verdict or 'missing'}"]
@@ -246,7 +285,10 @@ def enforce_judge(verdict: str, state: Handoff, judge: Handoff) -> tuple[str, li
         reasons.append(f"judge_status={judge.completion_status}")
     if state.completion_status != "review_ready":
         reasons.append(f"executor_status={state.completion_status}")
-    crit = judge.completion_criteria or state.completion_criteria
+    if pinned is not None:
+        crit = _apply_pinned(pinned, judge.completion_criteria)
+    else:
+        crit = judge.completion_criteria or state.completion_criteria
     if not crit:
         reasons.append("no_acceptance_criteria")
     unv = [c for c in crit if not c.get("verified")]
@@ -324,8 +366,14 @@ _ROLE_PROMPT = {
 }
 
 
-def _prompt(role: str, objective: str, ctx: str) -> str:
-    return f"{_ROLE_PROMPT[role]}{_SCHEMA}\n\nOBJECTIVE: {objective}\n\n{ctx}"
+def _prompt(role: str, objective: str, ctx: str, pinned: list[dict] | None = None) -> str:
+    pin = ""
+    if pinned is not None:
+        pin = (
+            "PINNED_CRITERIA (authoritative, immutable; reuse these exact ids, report only verified+evidence; "
+            "any added/changed/removed criteria are ignored): " + json.dumps(pinned, default=str) + "\n\n"
+        )
+    return f"{_ROLE_PROMPT[role]}{_SCHEMA}\n\n{pin}OBJECTIVE: {objective}\n\n{ctx}"
 
 
 # ── model selection ──────────────────────────────────────────────────────
@@ -399,8 +447,9 @@ def run_debate(
     stall_n = _no_progress_n()
 
     history: list[dict] = []  # every handoff, in order
+    pinned = _norm_criteria(criteria or [])  # original contract; never mutated by any stage
     state = Handoff(
-        mission_id=mission_id, objective=objective, stage="executor", completion_criteria=_norm_criteria(criteria or [])
+        mission_id=mission_id, objective=objective, stage="executor", completion_criteria=_apply_pinned(pinned, [])
     )
     latest: dict = state.to_dict()
     seen_fp: list[str] = []
@@ -412,9 +461,16 @@ def run_debate(
 
     def stage(role: str, model: str, iteration: int) -> Handoff:
         ctx = render_context([x for x in history if x["iteration"] < iteration], latest)
-        raw = call(model, _prompt(role, objective, ctx), f"PAL debate {role}. Output JSON only.")
+        raw = call(model, _prompt(role, objective, ctx, pinned), f"PAL debate {role}. Output JSON only.")
         h = parse_handoff(
-            raw, mission_id=mission_id, iteration=iteration, stage=role, model=model, role=role, objective=objective
+            raw,
+            mission_id=mission_id,
+            iteration=iteration,
+            stage=role,
+            model=model,
+            role=role,
+            objective=objective,
+            pinned=pinned,
         )
         if role == "judge":
             verdicts.append(str((_extract_json(raw) or {}).get("verdict", "")))
@@ -425,8 +481,6 @@ def run_debate(
     try:
         for it in range(1, cap + 1):
             state = stage("executor", ex, it)
-            if not state.completion_criteria and criteria:
-                state.completion_criteria = _norm_criteria(criteria)  # never lose the contract
             latest = state.to_dict()
             reviews: list[Handoff] = []
             for rm in revs:
@@ -436,11 +490,10 @@ def run_debate(
             # judge sees executor state + all reviews (reviews are in history)
             latest = {"executor": state.to_dict(), "reviews": [r.to_dict() for r in reviews]}
             j = stage("judge", judge_m, it)
-            verdict, reasons = enforce_judge(verdicts[-1], state, j)
+            verdict, reasons = enforce_judge(verdicts[-1], state, j, pinned)
 
             # carry judge's verification result forward as the authoritative criteria state
-            if j.completion_criteria:
-                state.completion_criteria = j.completion_criteria
+            state.completion_criteria = _apply_pinned(pinned, j.completion_criteria)
             latest = state.to_dict()
             latest["corrections"] = (
                 list(state.corrections) + [c for r in reviews for c in r.corrections] + list(j.corrections)

@@ -100,3 +100,43 @@ def test_unparseable_is_blocked_and_identity_forced():
 def test_disabled(monkeypatch):
     monkeypatch.setenv("PAL_DEBATE", "0")
     assert debate.run_debate("o")["outcome"] == "DISABLED"
+
+
+def test_stage_cannot_shrink_or_replace_pinned_criteria():
+    pinned = [{"id": "c1", "text": "real one"}, {"id": "c2", "text": "real two"}]
+    seen = {}
+
+    def call(model, prompt, system):
+        if model == "jg":
+            seen["jprompt"] = prompt
+        # every stage claims a single trivially-verified replacement contract
+        fake = [{"id": "c1", "text": "shrunk", "verified": True, "evidence": "x"}]
+        out = {"completion_status": "review_ready", "completion_criteria": fake, "confidence": 0.9}
+        if model == "jg":
+            out["verdict"] = "COMPLETE"
+        return json.dumps(out)
+
+    out = debate.run_debate("obj", pinned, call=call, models=MODELS)
+    assert out["outcome"] != "COMPLETE"
+    assert "unverified_criteria=['c2']" in out["verdict_reasons"]
+    assert "PINNED_CRITERIA" in seen["jprompt"] and "real two" in seen["jprompt"]
+    for h in out["history"]:
+        assert [(c["id"], c["text"]) for c in h["completion_criteria"]] == [("c1", "real one"), ("c2", "real two")]
+    assert out["final"]["completion_criteria"][0]["text"] == "real one"
+
+
+def test_judge_without_criteria_or_extra_ids_cannot_complete():
+    pinned = debate._norm_criteria([{"id": "c1", "text": "t"}])
+    st = debate.Handoff(completion_status="review_ready", completion_criteria=_crit(True))
+    jg = debate.parse_handoff(
+        '{"completion_status":"review_ready","completion_criteria":[{"id":"zz","verified":true}]}',
+        mission_id="m",
+        iteration=1,
+        stage="judge",
+        model="jg",
+        role="judge",
+        objective="o",
+        pinned=pinned,
+    )
+    v, r = debate.enforce_judge("COMPLETE", st, jg, pinned)
+    assert v == "CONTINUE" and any("unverified" in x for x in r)

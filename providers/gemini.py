@@ -155,9 +155,10 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
             full_prompt = prompt
 
         # Guardrail: redact credentials/PII at the send boundary (fail-open, per-call restore map)
-        from providers.router import guardrail
+        from providers.router import outbound
 
-        full_prompt, _mask_ctx = guardrail.mask_outbound(full_prompt)
+        full_prompt, _mask_ctx = outbound.prepare(full_prompt, model_name, compress=False)
+        from providers.router import guardrail
 
         # Headroom is intentionally NOT applied here: full_prompt is system +
         # history + user text with no tool-result boundary, so it must reach the

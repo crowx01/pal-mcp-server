@@ -78,3 +78,31 @@ def check_or_reroute(model: str, prompt: str, files: list[str] | None = None) ->
         return True, None
     alt = _bigger_alt(model)
     return False, f"route:{alt}" if alt else "route:none"
+
+
+class PayloadTooLarge(Exception):
+    """Raised by the provider send path when the POST-compression payload
+    still exceeds the model cap. ``status_code`` 413 makes
+    ``fallback_chain.call_with_fallback`` retry against peer models."""
+
+    status_code = 413
+
+    def __init__(self, model: str, tokens: int, hint: str | None):
+        self.model, self.tokens, self.hint = model, tokens, hint
+        super().__init__(f"413 payload too large for {model}: ~{tokens} tokens > cap {cap_for(model)} ({hint})")
+
+
+def payload_text(payload) -> str:
+    if isinstance(payload, str):
+        return payload
+    try:
+        import json
+
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        return str(payload)
+
+
+def check_payload(model: str, payload) -> tuple[bool, str | None]:
+    """Size check on the final outbound payload (call AFTER headroom)."""
+    return check_or_reroute(model, payload_text(payload))

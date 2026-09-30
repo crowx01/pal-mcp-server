@@ -92,8 +92,34 @@ def test_role_without_tool_format_requirement_is_looser(monkeypatch):
 def test_empty_role_pool_widens_to_fallback(monkeypatch):
     monkeypatch.setenv("PAL_TOOLS_MODELS", "some-plain-text-model")
     avail = _avail("some-plain-text-model")  # not tool-format-capable
+    assert tools_pool.select_pool("reviewer", "", is_available=avail) == ["some-plain-text-model"]
+
+
+def test_tool_executor_never_widens_to_incompatible_format(monkeypatch):
+    monkeypatch.setenv("PAL_TOOLS_MODELS", "some-plain-text-model")
+    avail = _avail("some-plain-text-model")
+    assert tools_pool.select_pool("tool_executor", "", is_available=avail) == []
+
+
+def test_incompatible_declared_format_is_filtered(monkeypatch):
+    monkeypatch.setenv("PAL_TOOLS_MODELS", "qwen3,xml-only-model,mystery-model,hermes-ok")
+    monkeypatch.setenv("PAL_TOOLS_FORMATS", "xml-only-model=anthropic_xml,hermes-ok=hermes")
+    avail = _avail("qwen3", "xml-only-model", "mystery-model", "hermes-ok")
     pool = tools_pool.select_pool("tool_executor", "", is_available=avail)
-    assert pool == ["some-plain-text-model"]
+    assert "xml-only-model" not in pool  # declared, but react.py can't parse it
+    assert "mystery-model" not in pool  # unknown format
+    assert set(pool) == {"qwen3", "hermes-ok"}
+    assert tools_pool.declared_tool_format("qwen3") == "hermes"
+
+
+def test_catalog_tools_true_without_format_is_not_enough(monkeypatch):
+    from types import SimpleNamespace
+
+    entry = SimpleNamespace(model="cat-model", aliases=[], tools=True)
+    monkeypatch.setattr("providers.router.catalog.routing_catalog", lambda: SimpleNamespace(entries=[entry]))
+    assert not tools_pool.is_tool_format_capable("cat-model")
+    entry.tool_format = "openai"
+    assert tools_pool.is_tool_format_capable("cat-model")
 
 
 def test_assign_roles_labels_pool():

@@ -62,6 +62,40 @@ KNOWN_TOOL_FORMAT: tuple[str, ...] = (
 )
 
 
+# Formats providers/tooling/react.py can parse. Anything else (or unknown) is
+# incompatible and must never be handed a tool_executor task.
+REACT_FORMATS = frozenset({"native", "openai", "hermes"})
+
+_HERMES_HINTS = ("qwen", "hermes")
+
+
+def declared_tool_format(model: str) -> str | None:
+    """Tool-call format `model` declares, or None if unknown.
+
+    Sources, in order: PAL_TOOLS_FORMATS ("model=fmt,model=fmt" override), a
+    catalog entry's ``tool_format`` attribute, then the KNOWN_TOOL_FORMAT
+    allow-list (qwen -> hermes, the rest -> openai/native). A bare catalog
+    ``tools=True`` says nothing about the text format and is NOT enough.
+    """
+    for pair in _env_list("PAL_TOOLS_FORMATS"):
+        name, _, fmt = pair.partition("=")
+        if name.strip() == model:
+            return fmt.strip().lower() or None
+    try:
+        from providers.router import catalog
+
+        for e in catalog.routing_catalog().entries:
+            if model in ({e.model, *e.aliases}):
+                fmt = getattr(e, "tool_format", None)
+                if fmt:
+                    return str(fmt).lower()
+    except Exception:
+        pass
+    if model in KNOWN_TOOL_FORMAT:
+        return "hermes" if any(h in model.lower() for h in _HERMES_HINTS) else "openai"
+    return None
+
+
 def _env_list(name: str) -> list[str]:
     raw = os.getenv(name, "")
     return [m.strip() for m in raw.split(",") if m.strip()]
@@ -72,19 +106,9 @@ def blocklist() -> set[str]:
 
 
 def is_tool_format_capable(model: str) -> bool:
-    """True if `model` is known (or catalog-declared) to emit a parseable
-    tool-call format. Unknown models are excluded from tool_executor duty."""
-    if model in KNOWN_TOOL_FORMAT:
-        return True
-    try:
-        from providers.router import catalog
-
-        for e in catalog.routing_catalog().entries:
-            if model in ({e.model, *e.aliases}) and e.tools is True:
-                return True
-    except Exception:
-        pass
-    return False
+    """True only if `model` declares a tool-call format react.py can parse.
+    Unknown or incompatible formats are excluded from tool_executor duty."""
+    return declared_tool_format(model) in REACT_FORMATS
 
 
 def _default_pool() -> list[str]:
@@ -197,9 +221,11 @@ def select_pool(
 
     filtered = [m for m in ordered if passes(m)]
 
-    if not filtered and role != "fallback":
+    if not filtered and role not in ("fallback", "tool_executor"):
         # nothing survived the role-specific filter -> widen to the generic
         # fallback pool so the caller still gets *something* to try.
+        # (never for tool_executor: a model that can't emit a parseable
+        # tool-call format would silently break the ReAct loop.)
         return select_pool("fallback", task, is_available=is_available, category=category)
 
     try:

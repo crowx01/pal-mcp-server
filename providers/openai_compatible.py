@@ -580,18 +580,12 @@ class OpenAICompatibleProvider(ModelProvider):
             # Text + images, use content array format
             messages.append({"role": "user", "content": user_content})
 
-        # Guardrail: redact credentials/PII at the send boundary (fail-open, per-call restore map)
+        # Outbound pipeline: mask -> headroom (tool results only) -> size_guard on
+        # the post-compression payload (413 -> fallback chain). See router/outbound.py.
+        from providers.router import outbound
+
+        messages, _mask_ctx = outbound.prepare(messages, model_name)
         from providers.router import guardrail
-
-        messages, _mask_ctx = guardrail.mask_outbound(messages)
-
-        # Headroom: shrink oversized embedded tool output (nmap/nuclei/sqlmap/
-        # HTTP/JSON/log dumps) before the size-guard cap check and send.
-        # Fail-open, canonical-evidence-safe, never touches tool call
-        # arguments — see headroom_adapter.py.
-        from providers.router import headroom_adapter
-
-        messages = headroom_adapter.compress_payload(messages)
 
         # Prepare completion parameters
         # Always disable streaming for OpenRouter

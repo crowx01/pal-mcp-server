@@ -16,7 +16,10 @@ def test_roundtrip_nested_and_prefix():
     payload = {
         "system": "key sk-abcdefghijklmnopqrstuvwx",
         "messages": [
-            {"role": "user", "content": [{"type": "text", "text": "Authorization: Bearer abc123def456ghi789 mail bob@example.com"}]},
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "Authorization: Bearer abc123def456ghi789 mail bob@example.com"}],
+            },
             {"role": "tool", "content": "password=hunter22 card 4111 1111 1111 1111"},
         ],
     }
@@ -31,7 +34,10 @@ def test_roundtrip_nested_and_prefix():
 
 def test_image_exempt():
     img = "data:image/png;base64," + "A" * 80
-    payload = [{"type": "image_url", "image_url": {"url": img}}, {"inline_data": {"mime_type": "image/png", "data": "user@x.com"}}]
+    payload = [
+        {"type": "image_url", "image_url": {"url": img}},
+        {"inline_data": {"mime_type": "image/png", "data": "user@x.com"}},
+    ]
     out, ctx = g.mask_outbound(payload)
     assert out == payload and not ctx
 
@@ -130,9 +136,12 @@ def test_dial_and_all_providers_call_guardrail():
     import inspect
 
     from providers import dial, gemini, openai_compatible
+    from providers.router import outbound
 
+    # Providers route through the single outbound pipeline, which must mask.
     for mod in (dial, gemini, openai_compatible):
-        assert "mask_outbound" in inspect.getsource(mod), mod.__name__
+        assert "outbound.prepare" in inspect.getsource(mod), mod.__name__
+    assert "mask_outbound" in inspect.getsource(outbound)
 
 
 def test_toolbelt_audit_redacts_before_truncation(tmp_path, monkeypatch):

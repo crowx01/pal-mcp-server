@@ -209,9 +209,10 @@ class DIALModelProvider(RegistryBackedProviderMixin, OpenAICompatibleProvider):
             messages.append({"role": "user", "content": user_message_content})
 
         # Guardrail: redact credentials/PII at the send boundary (fail-open, per-call restore map)
-        from providers.router import guardrail
+        from providers.router import outbound
 
-        messages, _mask_ctx = guardrail.mask_outbound(messages)
+        messages, _mask_ctx = outbound.prepare(messages, model_name)
+        from providers.router import guardrail
 
         # Resolve model name
         resolved_model = self._resolve_model_name(model_name)

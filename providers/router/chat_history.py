@@ -43,7 +43,9 @@ def new_session_id() -> str:
 
 def history_dir() -> Path:
     d = Path(os.getenv("PAL_CHAT_HISTORY_DIR", str(Path.home() / ".pal" / "chat_history")))
-    d.mkdir(parents=True, exist_ok=True)
+    # mode= is applied at mkdir(2) time (umask can only tighten it), so the leaf
+    # dir is never briefly group/world-accessible; chmod covers a pre-existing dir.
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         os.chmod(d, 0o700)
     except OSError:
@@ -60,6 +62,19 @@ def history_path(session_id: str) -> Path:
 # credential shape; false negatives are fine (best-effort), false positives
 # on ordinary chat text are not.
 _SECRET_PATTERNS = [
+    # PEM private key blocks (multi-line; an unterminated paste is masked to end of text).
+    # Must run before the generic key=value rule.
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)", re.DOTALL),
+        "<pem-private-key-redacted>",
+    ),
+    # HTTP Basic auth header; must precede the generic `authorization:` rule, which
+    # would otherwise mask only the word "Basic" and leave the base64 credential.
+    (re.compile(r"(?i)\bAuthorization\s*[:=]\s*Basic\s+[A-Za-z0-9+/=_-]{4,}"), "Authorization: Basic ***"),
+    # Bare token form: require a digit, +, / or = so prose like "Basic principles" is untouched.
+    (re.compile(r"\bBasic\s+(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/=])"), "Basic ***"),
+    # user:pass@host in URLs
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/:@]+:[^\s/@]+@"), r"\1***:***@"),
     (re.compile(r"\bsk-[A-Za-z0-9]{16,}\b"), "sk-***"),  # OpenAI-style
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AKIA***"),  # AWS access key id
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"), "gh*_***"),  # GitHub tokens
@@ -126,8 +141,11 @@ class JsonlSessionHistory(_PTHistory):
             return
         rec = {"ts": time.time(), "session": self.session_id, "text": mask_secrets(string)}
         try:
-            with self.path.open("a", encoding="utf-8") as fh:
+            # Create with 0600 atomically (no world-readable window); fchmod
+            # tightens a pre-existing file that had looser permissions.
+            fd = os.open(self.path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
                 fh.write(json.dumps(rec) + "\n")
-            os.chmod(self.path, 0o600)
         except OSError:
             pass  # history is a convenience, never fatal to the chat itself
