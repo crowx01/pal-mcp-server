@@ -462,7 +462,12 @@ class SimpleTool(BaseTool):
                 _dispatch_model = alt
 
             def _invoke_model(_model: str):
-                _prov = ModelProviderRegistry.get_provider_for_model(_model) or provider
+                # Primary model uses the provider already resolved for this call;
+                # only fallback / rerouted models need a registry lookup.
+                if _model == self._current_model_name:
+                    _prov = provider
+                else:
+                    _prov = ModelProviderRegistry.get_provider_for_model(_model) or provider
                 return _prov.generate_content(
                     prompt=prompt,
                     model_name=_model,

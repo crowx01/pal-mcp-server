@@ -132,7 +132,7 @@ def mark_canonical(text: str) -> str:
 
 def _unwrap_canonical(text: str) -> tuple[str, bool]:
     if isinstance(text, str) and text.startswith("\x00CANONICAL\x00"):
-        return text[len("\x00CANONICAL\x00"):], True
+        return text[len("\x00CANONICAL\x00") :], True
     return text, False
 
 
@@ -158,7 +158,7 @@ def safe_retrieve(handle: str) -> str | None:
     try:
         if not handle or not handle.startswith("headroom://"):
             return None
-        key = handle[len("headroom://"):]
+        key = handle[len("headroom://") :]
         if not re.fullmatch(r"[0-9a-f]{24}", key):
             return None
         p = _STORE_DIR / f"{key}.txt"
@@ -303,7 +303,11 @@ def _compress_sqlmap(text: str) -> str:
     keep = [
         ln
         for ln in lines
-        if re.search(r"back-end DBMS|Parameter:.*vulnerable|Type:|Title:|Payload:|available databases|current user|current database", ln, re.I)
+        if re.search(
+            r"back-end DBMS|Parameter:.*vulnerable|Type:|Title:|Payload:|available databases|current user|current database",
+            ln,
+            re.I,
+        )
     ]
     header = "[headroom: sqlmap summary — confirmations + payload lines only]"
     body = _head_tail_lines(keep, _keep_head(), _keep_tail())
@@ -469,14 +473,24 @@ def _walk_payload(obj: Any, in_args: bool = False) -> Any:
         if _is_canonical(obj):
             return obj
         role = obj.get("role")
-        if role == "system" or role == "developer":
-            return obj  # instructions are never tool output
-        prose = role in ("user", "assistant")  # real tool results use role "tool"
+        if role in ("system", "developer", "user", "assistant"):
+            # Prompts, instructions, history and tool-call arguments are never
+            # tool output. Only nested tool_result blocks (Anthropic-style, in a
+            # list ``content``) are candidates; plain string content is verbatim.
+            content = obj.get("content")
+            if isinstance(content, list):
+                out = dict(obj)
+                out["content"] = [
+                    _walk_payload(b, in_args=in_args) if isinstance(b, dict) and b.get("type") == "tool_result" else b
+                    for b in content
+                ]
+                return out
+            return obj
         out = {}
         for k, v in obj.items():
             child_in_args = in_args or (k in _ARG_KEYS)
             if isinstance(v, str) and k in _RESULT_KEYS and not child_in_args:
-                out[k] = compress_tool_result(v, structured_only=prose)
+                out[k] = compress_tool_result(v)
             else:
                 out[k] = _walk_payload(v, in_args=child_in_args)
         return out

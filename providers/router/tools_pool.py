@@ -34,7 +34,7 @@ fallback_chain expects (try [0], then [1], ...).
 from __future__ import annotations
 
 import os
-from typing import Callable, Optional
+from typing import Callable
 
 ROLES = ("tool_executor", "reviewer", "reasoner", "fallback")
 
@@ -153,7 +153,7 @@ def select_pool(
     role: str,
     task: str = "",
     *,
-    is_available: Optional[Callable[[str], bool]] = None,
+    is_available: Callable[[str], bool] | None = None,
     category: str = "tools",
 ) -> list[str]:
     """Ordered candidate list for ``role`` (best first), all filters applied.
@@ -166,9 +166,7 @@ def select_pool(
     """
     is_available = is_available or _default_is_available()
 
-    primary = os.getenv("PAL_TOOLS_PRIMARY_MODEL", "").strip() or os.getenv(
-        "PAL_CHAT_TOOLS_MODEL", ""
-    ).strip()
+    primary = os.getenv("PAL_TOOLS_PRIMARY_MODEL", "").strip() or os.getenv("PAL_CHAT_TOOLS_MODEL", "").strip()
     explicit_pool = _env_list("PAL_TOOLS_MODELS")
     fallbacks = _env_list("PAL_TOOLS_FALLBACK_MODELS")
     blocked = blocklist()
@@ -227,7 +225,7 @@ def assign_roles(pool: list[str]) -> dict[str, str]:
     return out
 
 
-def pick(role: str, task: str = "", is_available: Optional[Callable[[str], bool]] = None) -> Optional[str]:
+def pick(role: str, task: str = "", is_available: Callable[[str], bool] | None = None) -> str | None:
     """Single best model id for ``role`` -- convenience for callers that
     just need one name (a full pool is still what the ReAct loop should
     fail over across; see chat_repl._tools_loop_pool)."""

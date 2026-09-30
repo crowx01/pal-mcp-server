@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +22,7 @@ log = logging.getLogger(__name__)
 def generate(
     model: str,
     prompt: str,
-    system: Optional[str] = None,
+    system: str | None = None,
     *,
     temperature: float = 0.3,
     category: str = "",

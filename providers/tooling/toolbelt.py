@@ -141,7 +141,7 @@ class Toolbelt:
                         "model": model,
                         "tool": tool,
                         "args": args,
-                        "result_head": (result or "")[:400],
+                        "result_head": guardrail.redact_text(result or "")[:400],
                         "duration_s": round(dur, 3),
                     },
                     ensure_ascii=False,

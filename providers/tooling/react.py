@@ -88,4 +88,12 @@ def extract_calls(text: str) -> list[tuple[str, dict]]:
 
 
 def format_result(name: str, result: str) -> str:
+    # Tool output is untrusted: flag injection markers (block mode -> neutralised notice)
+    try:
+        from providers.router import guardrail
+
+        guardrail.scan_inbound(result)
+    except Exception as exc:  # GuardrailBlocked or fail-open
+        if exc.__class__.__name__ == "GuardrailBlocked":
+            result = f"[tool output withheld by guardrail: {exc}]"
     return f'<tool_result name="{name}">{result}</tool_result>'

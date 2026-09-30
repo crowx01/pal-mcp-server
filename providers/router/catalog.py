@@ -40,7 +40,7 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
@@ -77,11 +77,11 @@ class CatalogEntry:
     model: str  # canonical wire id
     display: str
     aliases: list[str] = field(default_factory=list)
-    chat: Optional[bool] = True
-    tools: Optional[bool] = None  # None = unknown (never treated as True)
-    vision: Optional[bool] = None
-    structured_output: Optional[bool] = None
-    reasoning: Optional[bool] = None
+    chat: bool | None = True
+    tools: bool | None = None  # None = unknown (never treated as True)
+    vision: bool | None = None
+    structured_output: bool | None = None
+    reasoning: bool | None = None
     context_limit: int = 0
     availability: str = AVAILABLE  # available|no_auth|unhealthy|stale|discovered
     quality_profile: dict = field(default_factory=dict)  # {intelligence, rank}
@@ -195,7 +195,7 @@ def _auth(adapter: str) -> tuple[bool, str]:
 ADAPTERS = ("google", "openai", "xai", "openrouter", "custom", "dial", "azure")
 
 
-def _discovery_request(adapter: str) -> Optional[tuple[str, dict]]:
+def _discovery_request(adapter: str) -> tuple[str, dict] | None:
     """(url, headers) for the live model listing, or None if the adapter has none."""
     if adapter == "google":
         return (
@@ -221,7 +221,7 @@ def _discovery_request(adapter: str) -> Optional[tuple[str, dict]]:
 # --------------------------------------------------------------------------
 # Discovery parsing: raw /models JSON -> normalised dicts. Unknown stays None.
 # --------------------------------------------------------------------------
-def _per_mtok(value: Any) -> Optional[float]:
+def _per_mtok(value: Any) -> float | None:
     try:
         return round(float(value) * 1_000_000, 4)
     except (TypeError, ValueError):
@@ -300,7 +300,9 @@ _PARSERS: dict[str, Callable[[dict], list[dict]]] = {
 
 def _http_json(url: str, headers: dict, timeout: float = FETCH_TIMEOUT_S) -> dict:
     """Injectable in tests. Never logs headers (they carry credentials)."""
-    req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "pal-mcp-server/catalog", **headers})  # noqa: S310
+    req = urllib.request.Request(
+        url, headers={"Accept": "application/json", "User-Agent": "pal-mcp-server/catalog", **headers}
+    )  # noqa: S310
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8"))
 
@@ -348,7 +350,7 @@ def _write_cache(data: dict) -> None:
 
 def _discover(
     adapter: str, service: str, cache: dict, *, refresh: bool, network: bool, fetcher: Callable
-) -> tuple[Optional[list[dict]], dict, bool]:
+) -> tuple[list[dict] | None, dict, bool]:
     """Return (models_or_None, status, cache_dirty). Models None = no listing available."""
     if _discovery_request(adapter) is None:
         return None, {"status": "off", "reason": "static-only adapter"}, False
@@ -387,7 +389,7 @@ def _load_profiles() -> dict:
         return {}
 
 
-def _tier_from_price(input_per_mtok: Optional[float], output_per_mtok: Optional[float]) -> Optional[str]:
+def _tier_from_price(input_per_mtok: float | None, output_per_mtok: float | None) -> str | None:
     if input_per_mtok is None and output_per_mtok is None:
         return None
     i, o = input_per_mtok or 0.0, output_per_mtok or 0.0
@@ -397,7 +399,7 @@ def _tier_from_price(input_per_mtok: Optional[float], output_per_mtok: Optional[
     return "low" if blended < 1.0 else "mid" if blended < 8.0 else "high"
 
 
-def _cost_profile(service: str, model: str, intelligence: int, disc: Optional[dict], profiles: dict) -> dict:
+def _cost_profile(service: str, model: str, intelligence: int, disc: dict | None, profiles: dict) -> dict:
     ipm = (disc or {}).get("input_per_mtok")
     opm = (disc or {}).get("output_per_mtok")
     tier = _tier_from_price(ipm, opm)
@@ -465,7 +467,7 @@ def build(
     refresh: bool = False,
     discover: bool = True,
     include_unavailable: bool = False,
-    fetcher: Optional[Callable] = None,
+    fetcher: Callable | None = None,
 ) -> Catalog:
     """Merge static manifests with discovery for every real, authenticated service.
 
@@ -485,7 +487,7 @@ def build(
         if not authed and not include_unavailable:
             continue
         static = _static_entries(adapter, service)
-        live: Optional[list[dict]] = None
+        live: list[dict] | None = None
         if authed:
             live, st, d = _discover(adapter, service, cache, refresh=refresh, network=discover, fetcher=fetcher)
             dirty |= d
@@ -561,14 +563,14 @@ def reset_memo() -> None:
 # --------------------------------------------------------------------------
 @dataclass
 class Need:
-    tier: Optional[str] = None  # "cheap" | "smart" | None
+    tier: str | None = None  # "cheap" | "smart" | None
     tools: bool = False
     vision: bool = False
     structured_output: bool = False
     reasoning: bool = False
     min_context: int = 0
     min_intelligence: int = 0
-    providers: Optional[set[str]] = None  # allow-list of services
+    providers: set[str] | None = None  # allow-list of services
     # Free-tier routes (pricing == 0) commonly log prompts and rotate the
     # underlying model, so they are excluded unless a category opts in.
     allow_free_tier: bool = False
@@ -608,7 +610,7 @@ def _prior_index(e: CatalogEntry, priors: tuple[str, ...]) -> int:
     return len(priors)
 
 
-def select(need: Need, entries: Optional[list[CatalogEntry]] = None, priors: tuple[str, ...] = ()) -> list[CatalogEntry]:
+def select(need: Need, entries: list[CatalogEntry] | None = None, priors: tuple[str, ...] = ()) -> list[CatalogEntry]:
     """Eligible entries, best first.
 
     Capabilities decide *who may run*; the operator prior (legacy name list)
@@ -629,7 +631,7 @@ def _bulk_ctx() -> int:
     return int(os.getenv("PAL_CATALOG_BULK_CTX", "200000"))
 
 
-def category_need(category: str) -> Optional[Need]:
+def category_need(category: str) -> Need | None:
     """Capability requirements per classifier category."""
     if category == "long_context_bulk":
         return Need(min_context=_bulk_ctx(), allow_free_tier=True)  # bulk read of non-sensitive files
@@ -665,7 +667,7 @@ def order_for_category(category: str, priors: list[str]) -> list[str]:
     return out
 
 
-def pick_tier(tier: str, is_available: Callable[[str], bool], priors: tuple[str, ...] = ()) -> Optional[str]:
+def pick_tier(tier: str, is_available: Callable[[str], bool], priors: tuple[str, ...] = ()) -> str | None:
     """Best model id for the chat tier ('cheap' | 'smart') from the catalog.
 
     ``is_available`` is the live registry check, applied to the model id and

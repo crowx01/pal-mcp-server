@@ -101,15 +101,34 @@ _PATTERNS: list[tuple[str, re.Pattern[str], int]] = [
 ]
 
 _INJECTION: list[tuple[str, re.Pattern[str]]] = [
-    ("ignore_instructions", re.compile(r"(?i)\b(ignore|disregard|forget)\b[^.\n]{0,40}\b(previous|prior|above|earlier|all)\b[^.\n]{0,30}\b(instructions?|rules?|prompts?)\b")),
-    ("role_override", re.compile(r"(?i)\byou\s+are\s+now\s+(?:a|an|in)\b|\bnew\s+system\s+prompt\b|\bact\s+as\s+(?:dan|root|admin)\b")),
+    (
+        "ignore_instructions",
+        re.compile(
+            r"(?i)\b(ignore|disregard|forget)\b[^.\n]{0,40}\b(previous|prior|above|earlier|all)\b[^.\n]{0,30}\b(instructions?|rules?|prompts?)\b"
+        ),
+    ),
+    (
+        "role_override",
+        re.compile(
+            r"(?i)\byou\s+are\s+now\s+(?:a|an|in)\b|\bnew\s+system\s+prompt\b|\bact\s+as\s+(?:dan|root|admin)\b"
+        ),
+    ),
     ("chat_template_token", re.compile(r"<\|(?:im_start|im_end|system|endoftext)\|>|\[/?INST\]|<<SYS>>")),
-    ("prompt_leak", re.compile(r"(?i)\b(reveal|print|show|repeat)\b[^.\n]{0,30}\b(system\s+prompt|hidden\s+instructions)\b")),
+    (
+        "prompt_leak",
+        re.compile(r"(?i)\b(reveal|print|show|repeat)\b[^.\n]{0,30}\b(system\s+prompt|hidden\s+instructions)\b"),
+    ),
+    ("system_override", re.compile(r"(?im)^\s*(?:#+\s*|\[|<)?(?:system|assistant|developer)\s*(?:override|prompt|message|instruction)s?\s*[\]>:]|\bsystem\s*:\s*override\b|\b(?:override|bypass)\b[^.\n]{0,20}\b(?:system|safety)\b[^.\n]{0,20}\b(?:prompt|instructions?|rules?|guardrails?)\b")),
+    ("fenced_system", re.compile(r"(?i)```\s*(?:system|instructions?|developer)\b|<(?:system|instructions?)>")),
+    (
+        "tool_call_spoof",
+        re.compile(r"(?i)<tool_(?:call|use)\b|<function_calls?>|<function=|<tool_result\b|\"tool_calls?\"\s*:|\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"(?:arguments|args|parameters)\""),
+    ),
     ("exfil_instruction", re.compile(r"(?i)\b(send|post|upload|exfiltrate)\b[^.\n]{0,60}\b(to|at)\s+https?://")),
 ]
 
 # keys whose values are never text to scan
-_SKIP_KEYS = frozenset({"role", "model", "type", "id", "name", "mime_type", "mimeType", "media_type", "detail"})
+_SKIP_KEYS = frozenset({"role", "model", "type", "mime_type", "mimeType", "media_type"})
 _BINARY_KEYS = frozenset({"data", "bytes", "image", "b64_json", "base64"})
 
 
@@ -156,13 +175,30 @@ class MaskContext:
 
 
 # ---- core text masking ----------------------------------------------------
+_DATA_IMAGE = re.compile(r"data:image/[A-Za-z0-9.+\-]+;base64,[A-Za-z0-9+/=_\-]+")
+
+
 def _mask_text(text: str, ctx: MaskContext) -> str:
     if not text or text.startswith("data:image/"):
+        return text
+    if "data:image/" in text:  # embedded (markdown/JSON) image blobs: mask only the gaps
+        out, last = [], 0
+        for m in _DATA_IMAGE.finditer(text):
+            out.append(_mask_plain(text[last : m.start()], ctx))
+            out.append(m.group(0))
+            last = m.end()
+        out.append(_mask_plain(text[last:], ctx))
+        return "".join(out)
+    return _mask_plain(text, ctx)
+
+
+def _mask_plain(text: str, ctx: MaskContext) -> str:
+    if not text:
         return text
     for kind, rx, grp in _PATTERNS:
         if kind == "credit_card":
 
-            def _cc(m: re.Match[str]) -> str:
+            def _cc(m: re.Match[str], kind: str = kind) -> str:
                 digits = re.sub(r"\D", "", m.group(0))
                 if 13 <= len(digits) <= 19 and _luhn(digits):
                     return ctx.placeholder(kind, m.group(0))
@@ -201,12 +237,20 @@ def _walk(obj: Any, ctx: MaskContext, key: str | None = None) -> Any:
             elif k == "source" and isinstance(v, dict) and v.get("type") == "base64":
                 out[k] = v
             else:
-                out[k] = _walk(v, ctx, k if isinstance(k, str) else None)
+                mk = _mask_text(k, ctx) if isinstance(k, str) else k
+                out[mk] = _walk(v, ctx, k if isinstance(k, str) else None)
         return out
     if isinstance(obj, list):
         return [_walk(v, ctx, key) for v in obj]
     if isinstance(obj, tuple):
         return tuple(_walk(v, ctx, key) for v in obj)
+    if isinstance(obj, (set, frozenset)):
+        return type(obj)(_walk(v, ctx, key) for v in obj)
+    if isinstance(obj, (bytes, bytearray)) and key not in _BINARY_KEYS:
+        try:
+            return _mask_text(bytes(obj).decode("utf-8"), ctx).encode("utf-8")
+        except UnicodeDecodeError:
+            return obj
     return obj
 
 

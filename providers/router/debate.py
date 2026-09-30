@@ -43,7 +43,7 @@ import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -53,15 +53,36 @@ STATUSES = ("in_progress", "review_ready", "blocked")
 _BLOCKING_SEV = {"high", "critical"}
 
 HANDOFF_FIELDS = (
-    "mission_id", "iteration", "stage", "model", "role", "objective",
-    "actions_taken", "files_changed", "commands_executed", "tests_executed",
-    "evidence", "findings", "corrections", "remaining_risks", "open_questions",
-    "completion_criteria", "completion_status", "confidence",
+    "mission_id",
+    "iteration",
+    "stage",
+    "model",
+    "role",
+    "objective",
+    "actions_taken",
+    "files_changed",
+    "commands_executed",
+    "tests_executed",
+    "evidence",
+    "findings",
+    "corrections",
+    "remaining_risks",
+    "open_questions",
+    "completion_criteria",
+    "completion_status",
+    "confidence",
     "recommended_next_stage",
 )
 _LIST_FIELDS = {
-    "actions_taken", "files_changed", "commands_executed", "tests_executed",
-    "evidence", "findings", "corrections", "remaining_risks", "open_questions",
+    "actions_taken",
+    "files_changed",
+    "commands_executed",
+    "tests_executed",
+    "evidence",
+    "findings",
+    "corrections",
+    "remaining_risks",
+    "open_questions",
     "completion_criteria",
 }
 
@@ -146,18 +167,20 @@ def _norm_criteria(items: Any) -> list[dict]:
     out = []
     for i, c in enumerate(items if isinstance(items, list) else []):
         if isinstance(c, dict):
-            out.append({
-                "id": str(c.get("id", f"c{i + 1}")),
-                "text": str(c.get("text", "")),
-                "verified": c.get("verified") is True,  # strict: only literal true
-                "evidence": c.get("evidence", ""),
-            })
+            out.append(
+                {
+                    "id": str(c.get("id", f"c{i + 1}")),
+                    "text": str(c.get("text", "")),
+                    "verified": c.get("verified") is True,  # strict: only literal true
+                    "evidence": c.get("evidence", ""),
+                }
+            )
         elif isinstance(c, str):
             out.append({"id": f"c{i + 1}", "text": c, "verified": False, "evidence": ""})
     return out
 
 
-def _extract_json(text: str) -> Optional[dict]:
+def _extract_json(text: str) -> dict | None:
     """Lenient: whole string, ```json fence, or first balanced {...} span."""
     text = (text or "").strip()
     cands = [text]
@@ -166,7 +189,7 @@ def _extract_json(text: str) -> Optional[dict]:
         cands.append(m.group(1))
     s, e = text.find("{"), text.rfind("}")
     if 0 <= s < e:
-        cands.append(text[s:e + 1])
+        cands.append(text[s : e + 1])
     for c in cands:
         try:
             obj = json.loads(c)
@@ -177,14 +200,14 @@ def _extract_json(text: str) -> Optional[dict]:
     return None
 
 
-def parse_handoff(text: str, *, mission_id: str, iteration: int, stage: str,
-                  model: str, role: str, objective: str) -> Handoff:
+def parse_handoff(
+    text: str, *, mission_id: str, iteration: int, stage: str, model: str, role: str, objective: str
+) -> Handoff:
     """Parse model output into a Handoff. Identity fields are forced to the
     orchestrator's values (a model cannot spoof mission/stage/model). Unparseable
     output yields a blocked handoff carrying the raw text as evidence."""
     obj = _extract_json(text)
-    h = Handoff(mission_id=mission_id, iteration=iteration, stage=stage,
-                model=model, role=role, objective=objective)
+    h = Handoff(mission_id=mission_id, iteration=iteration, stage=stage, model=model, role=role, objective=objective)
     if obj is None:
         h.completion_status = "blocked"
         h.evidence = [f"unparseable_output: {(text or '')[:800]}"]
@@ -240,8 +263,10 @@ def enforce_judge(verdict: str, state: Handoff, judge: Handoff) -> tuple[str, li
 def fingerprint(state: Handoff, reviews: list[Handoff]) -> str:
     """Stable digest of *substantive* state. Free-text prose is excluded so
     rephrasing alone doesn't count as progress."""
+
     def _s(x):
         return json.dumps(x, sort_keys=True, default=str)
+
     payload = {
         "verified": sorted(c["id"] for c in state.completion_criteria if c.get("verified")),
         "files": sorted(map(_s, state.files_changed)),
@@ -260,16 +285,16 @@ def _compress_prior(d: dict) -> dict:
     """Headroom-compress bulk text in an *old* handoff; structured decision
     fields (criteria, findings, status) stay verbatim."""
     from providers.router import headroom_adapter as ha
+
     out = dict(d)
     for k in _BULK:
         v = out.get(k)
         if v:
-            out[k] = [ha.compress_tool_result(x, tool_name="debate_handoff") if isinstance(x, str) else x
-                      for x in v]
+            out[k] = [ha.compress_tool_result(x, tool_name="debate_handoff") if isinstance(x, str) else x for x in v]
     return out
 
 
-def render_context(history: list[dict], latest: Optional[dict]) -> str:
+def render_context(history: list[dict], latest: dict | None) -> str:
     compress = _flag("PAL_DEBATE_COMPRESS", "1")
     parts = []
     for h in history:
@@ -290,12 +315,12 @@ _SCHEMA = (
 )
 _ROLE_PROMPT = {
     "executor": "You are the EXECUTOR. Do or revise the work toward the objective, apply prior corrections, "
-                "report exactly what you did and verified. Set review_ready only when you believe all criteria are met. ",
+    "report exactly what you did and verified. Set review_ready only when you believe all criteria are met. ",
     "reviewer": "You are a skeptical REVIEWER. Verify the latest handoff's claims, list defects as findings, "
-                "give concrete corrections, and flip verified->false on criteria lacking evidence. ",
-    "judge": "You are the JUDGE. Add a top-level key \"verdict\": \"COMPLETE\" or \"CONTINUE\". COMPLETE only if "
-             "completion_status=review_ready and every criterion is verified with evidence and no high/critical "
-             "finding is open. Otherwise CONTINUE with recommended_next_stage. ",
+    "give concrete corrections, and flip verified->false on criteria lacking evidence. ",
+    "judge": 'You are the JUDGE. Add a top-level key "verdict": "COMPLETE" or "CONTINUE". COMPLETE only if '
+    "completion_status=review_ready and every criterion is verified with evidence and no high/critical "
+    "finding is open. Otherwise CONTINUE with recommended_next_stage. ",
 }
 
 
@@ -306,13 +331,16 @@ def _prompt(role: str, objective: str, ctx: str) -> str:
 # ── model selection ──────────────────────────────────────────────────────
 def _resolve_models() -> tuple[str, list[str], str]:
     from providers.router import chat_repl, chat_router
+
     ex = os.getenv("PAL_DEBATE_EXECUTOR") or chat_router.route("code", chat_repl._is_available).get("smart")
     if not ex:
         raise RuntimeError("debate: no executor model available")
     revs = _csv("PAL_DEBATE_REVIEWERS")
     if not revs:
-        cand = [chat_router.route("review", chat_repl._is_available).get("smart"),
-                chat_router.route("hi", chat_repl._is_available).get("cheap")]
+        cand = [
+            chat_router.route("review", chat_repl._is_available).get("smart"),
+            chat_router.route("hi", chat_repl._is_available).get("cheap"),
+        ]
         revs = [m for m in dict.fromkeys(cand) if m]
     judge = os.getenv("PAL_DEBATE_JUDGE") or (revs[0] if revs else ex)
     return ex, revs, judge
@@ -320,8 +348,10 @@ def _resolve_models() -> tuple[str, list[str], str]:
 
 def _default_call(model: str, prompt: str, system: str) -> str:
     from providers.router import dispatch
-    resp = dispatch.generate(model, prompt, system, temperature=_float("PAL_DEBATE_TEMPERATURE", 0.2),
-                             category="debate", tool="debate")
+
+    resp = dispatch.generate(
+        model, prompt, system, temperature=_float("PAL_DEBATE_TEMPERATURE", 0.2), category="debate", tool="debate"
+    )
     return getattr(resp, "content", "") or ""
 
 
@@ -340,11 +370,11 @@ def _persist(mission_id: str, h: Handoff) -> None:
 
 def run_debate(
     objective: str,
-    criteria: Optional[list] = None,
+    criteria: list | None = None,
     *,
-    call: Optional[Callable[[str, str, str], str]] = None,
-    models: Optional[tuple[str, list[str], str]] = None,
-    mission_id: Optional[str] = None,
+    call: Callable[[str, str, str], str] | None = None,
+    models: tuple[str, list[str], str] | None = None,
+    mission_id: str | None = None,
 ) -> dict:
     """Run the pipeline. ``call(model, prompt, system) -> text`` is injectable
     for tests; default routes through ``dispatch.generate`` (the PAL path).
@@ -355,16 +385,23 @@ def run_debate(
     """
     mission_id = mission_id or uuid.uuid4().hex[:12]
     if not is_enabled():
-        return {"mission_id": mission_id, "outcome": "DISABLED", "iterations": 0,
-                "halt_reason": "PAL_DEBATE=0", "history": [], "final": None}
+        return {
+            "mission_id": mission_id,
+            "outcome": "DISABLED",
+            "iterations": 0,
+            "halt_reason": "PAL_DEBATE=0",
+            "history": [],
+            "final": None,
+        }
     call = call or _default_call
     ex, revs, judge_m = models or _resolve_models()
     cap = max_iterations()
     stall_n = _no_progress_n()
 
-    history: list[dict] = []          # every handoff, in order
-    state = Handoff(mission_id=mission_id, objective=objective, stage="executor",
-                    completion_criteria=_norm_criteria(criteria or []))
+    history: list[dict] = []  # every handoff, in order
+    state = Handoff(
+        mission_id=mission_id, objective=objective, stage="executor", completion_criteria=_norm_criteria(criteria or [])
+    )
     latest: dict = state.to_dict()
     seen_fp: list[str] = []
     reasons: list[str] = []
@@ -374,11 +411,11 @@ def run_debate(
     verdicts: list[str] = []
 
     def stage(role: str, model: str, iteration: int) -> Handoff:
-        ctx = render_context([x for x in history if x['iteration'] < iteration], latest)
-        raw = call(model, _prompt(role, objective, ctx),
-                   f"PAL debate {role}. Output JSON only.")
-        h = parse_handoff(raw, mission_id=mission_id, iteration=iteration,
-                          stage=role, model=model, role=role, objective=objective)
+        ctx = render_context([x for x in history if x["iteration"] < iteration], latest)
+        raw = call(model, _prompt(role, objective, ctx), f"PAL debate {role}. Output JSON only.")
+        h = parse_handoff(
+            raw, mission_id=mission_id, iteration=iteration, stage=role, model=model, role=role, objective=objective
+        )
         if role == "judge":
             verdicts.append(str((_extract_json(raw) or {}).get("verdict", "")))
         history.append(h.to_dict())
@@ -405,7 +442,9 @@ def run_debate(
             if j.completion_criteria:
                 state.completion_criteria = j.completion_criteria
             latest = state.to_dict()
-            latest["corrections"] = list(state.corrections) + [c for r in reviews for c in r.corrections] + list(j.corrections)
+            latest["corrections"] = (
+                list(state.corrections) + [c for r in reviews for c in r.corrections] + list(j.corrections)
+            )
             latest["findings"] = [f for r in reviews for f in r.findings] + list(j.findings)
 
             if verdict == "COMPLETE":
@@ -417,7 +456,7 @@ def run_debate(
 
             fp = fingerprint(state, reviews + [j])
             seen_fp.append(fp)
-            if len(seen_fp) >= stall_n + 1 and len(set(seen_fp[-(stall_n + 1):])) == 1:
+            if len(seen_fp) >= stall_n + 1 and len(set(seen_fp[-(stall_n + 1) :])) == 1:
                 outcome, halt = "NO_PROGRESS", f"state fingerprint unchanged for {stall_n} iterations"
                 break
     except Exception as exc:  # total fallback exhaustion etc.
@@ -425,21 +464,26 @@ def run_debate(
         outcome, halt = "ERROR", f"{exc.__class__.__name__}: {exc}"
 
     return {
-        "mission_id": mission_id, "outcome": outcome, "iterations": it,
-        "halt_reason": halt, "verdict_reasons": reasons,
-        "final": latest, "history": history,
+        "mission_id": mission_id,
+        "outcome": outcome,
+        "iterations": it,
+        "halt_reason": halt,
+        "verdict_reasons": reasons,
+        "final": latest,
+        "history": history,
     }
 
 
-
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     import argparse
+
     ap = argparse.ArgumentParser(prog="pal debate", description="executor -> reviewers -> judge pipeline")
     ap.add_argument("objective")
     ap.add_argument("--criterion", action="append", default=[], help="acceptance criterion (repeatable)")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     from providers.router import headless
+
     headless._setup()
     out = run_debate(a.objective, a.criterion)
     if a.json:

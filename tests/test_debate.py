@@ -19,14 +19,27 @@ def _script(judge_seq, exec_verified=True):
     def call(model, prompt, system):
         calls.append(model)
         if model == "ex":
-            return json.dumps({"completion_status": "review_ready", "completion_criteria": _crit(exec_verified),
-                               "files_changed": ["a.py"], "confidence": 0.9})
+            return json.dumps(
+                {
+                    "completion_status": "review_ready",
+                    "completion_criteria": _crit(exec_verified),
+                    "files_changed": ["a.py"],
+                    "confidence": 0.9,
+                }
+            )
         if model.startswith("rv"):
             return json.dumps({"findings": [], "completion_criteria": _crit(exec_verified)})
         v = judge_seq.pop(0) if len(judge_seq) > 1 else judge_seq[0]
-        return json.dumps({"verdict": v[0], "completion_status": "review_ready",
-                           "completion_criteria": _crit(v[1]), "confidence": 0.9,
-                           "recommended_next_stage": "executor"})
+        return json.dumps(
+            {
+                "verdict": v[0],
+                "completion_status": "review_ready",
+                "completion_criteria": _crit(v[1]),
+                "confidence": 0.9,
+                "recommended_next_stage": "executor",
+            }
+        )
+
     return call, calls
 
 
@@ -53,8 +66,8 @@ def test_max_iter_hard_cap(monkeypatch):
 
     def call(model, prompt, system):  # always progresses (new file each round)
         n["i"] += 1
-        return json.dumps({"verdict": "CONTINUE", "completion_status": "in_progress",
-                           "files_changed": [f"f{n['i']}"]})
+        return json.dumps({"verdict": "CONTINUE", "completion_status": "in_progress", "files_changed": [f"f{n['i']}"]})
+
     out = debate.run_debate("o", call=call, models=MODELS)
     assert out["outcome"] == "MAX_ITER" and out["iterations"] == 2
 
@@ -68,11 +81,19 @@ def test_no_progress_halts(monkeypatch):
 
 
 def test_unparseable_is_blocked_and_identity_forced():
-    h = debate.parse_handoff("garbage", mission_id="m", iteration=1, stage="executor",
-                             model="x", role="executor", objective="o")
+    h = debate.parse_handoff(
+        "garbage", mission_id="m", iteration=1, stage="executor", model="x", role="executor", objective="o"
+    )
     assert h.completion_status == "blocked" and h.mission_id == "m"
-    h2 = debate.parse_handoff('{"mission_id":"evil","model":"evil"}', mission_id="m", iteration=1,
-                              stage="executor", model="x", role="executor", objective="o")
+    h2 = debate.parse_handoff(
+        '{"mission_id":"evil","model":"evil"}',
+        mission_id="m",
+        iteration=1,
+        stage="executor",
+        model="x",
+        role="executor",
+        objective="o",
+    )
     assert h2.mission_id == "m" and h2.model == "x"
 
 

@@ -159,14 +159,9 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
 
         full_prompt, _mask_ctx = guardrail.mask_outbound(full_prompt)
 
-        # Headroom: shrink oversized embedded tool output (nmap/nuclei/sqlmap/
-        # HTTP/JSON/log dumps) before the size-guard cap check and send.
-        # Fail-open, canonical-evidence-safe — see headroom_adapter.py.
-        from providers.router import headroom_adapter
-
-        # Structured scanner/HTTP/JSON output only: system prompt and prose must
-        # reach the model verbatim (log/text summarisers are skipped).
-        full_prompt = headroom_adapter.compress_tool_result(full_prompt, structured_only=True)
+        # Headroom is intentionally NOT applied here: full_prompt is system +
+        # history + user text with no tool-result boundary, so it must reach the
+        # model byte-exact. Headroom only compresses genuine tool-result blobs.
         parts.append({"text": full_prompt})
 
         # Add images if provided and model supports vision

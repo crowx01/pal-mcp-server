@@ -13,7 +13,9 @@ import re
 # Defense in depth: every value that reaches the dump passes through _scrub().
 # Sections only ever collect counters / names / states, but a future snapshot
 # that leaks a token, restore-map or prompt must still not reach the terminal.
-_SECRET_KEY = re.compile(r"(key|secret|token|password|passwd|authorization|bearer|credential|cookie|restore|prompt|mapping|payload)", re.I)
+_SECRET_KEY = re.compile(
+    r"(key|secret|token|password|passwd|authorization|bearer|credential|cookie|restore|prompt|mapping|payload)", re.I
+)
 _SECRET_VAL = re.compile(
     r"(sk-[A-Za-z0-9_\-]{8,}|gsk_[A-Za-z0-9]{8,}|AIza[0-9A-Za-z_\-]{20,}|xox[abpr]-[A-Za-z0-9\-]{8,}"
     r"|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"
@@ -25,7 +27,12 @@ _SAFE_KEYS = frozenset({"tokens_per_min", "tpm_used", "tpm_cap", "tokens", "prom
 
 
 def _scrub(obj, key: str | None = None):
-    if key and key not in _SAFE_KEYS and _SECRET_KEY.search(key) and not isinstance(obj, (bool, int, float, type(None))):
+    if (
+        key
+        and key not in _SAFE_KEYS
+        and _SECRET_KEY.search(key)
+        and not isinstance(obj, (bool, int, float, type(None)))
+    ):
         return "<redacted>"
     if isinstance(obj, dict):
         return {str(k): _scrub(v, str(k)) for k, v in obj.items()}
@@ -189,44 +196,60 @@ def collect() -> dict:
             "stages": list(debate.STAGES),
         }
 
-    return _scrub({
-        "flags": {
-            "PAL_SELF_HEAL": _safe(self_heal.is_enabled, False),
-            "PAL_HEALTH_PROBE": _safe(health_probe.is_enabled, False),
-            "PAL_RATE_LIMIT": _safe(rate_limit.is_enabled, False),
-            "PAL_CACHE": _safe(response_cache.is_enabled, False),
-            "PAL_REFUSAL_MEMORY": _safe(refusal_memory.is_enabled, False),
-            "PAL_CLASSIFIER": _safe(classifier.is_enabled, False),
-            "PAL_EPISODE_STORE": _safe(episode_store.is_enabled, False),
-            "PAL_BANDIT": _safe(bandit.is_enabled, False),
-            "PAL_FALLBACK": _safe(fallback_chain.is_enabled, False),
-            "PAL_GUARDRAIL": _safe(guardrail.is_enabled, False),
-            "PAL_HEADROOM": _safe(headroom_adapter.is_enabled, False),
-            "PAL_DEBATE": _safe(debate.is_enabled, False),
-        },
-        "self_heal_alias_log": str(self_heal.DRIFT_LOG),
-        "health": _safe(health_probe.snapshot, {}),
-        "quota": _safe(_quota_view, None),
-        "rate_limit": _safe(rate_limit.snapshot, {}),
-        "breaker": _safe(refusal_memory.snapshot, {}),
-        "fallback": _safe(_fallback_view, None),
-        "size_guard": _safe(_size_guard_view, None),
-        "guardrail": _safe(_guardrail_view, None),
-        "headroom": _safe(_headroom_view, None),
-        "catalog": _safe(_catalog_view, None),
-        "tool_pool": _safe(_tool_pool_view, None),
-        "debate": _safe(_debate_view, None),
-        "cache": _safe(response_cache.snapshot, {}),
-        "refusals": _safe(refusal_memory.snapshot, {}),
-        "episodes": _safe(_episodes_view, None),
-        "bandit": _safe(_bandit_view, None),
-        "toolbelt": _safe(_toolbelt, {"note": "toolbelt import failed"}),
-    })
+    return _scrub(
+        {
+            "flags": {
+                "PAL_SELF_HEAL": _safe(self_heal.is_enabled, False),
+                "PAL_HEALTH_PROBE": _safe(health_probe.is_enabled, False),
+                "PAL_RATE_LIMIT": _safe(rate_limit.is_enabled, False),
+                "PAL_CACHE": _safe(response_cache.is_enabled, False),
+                "PAL_REFUSAL_MEMORY": _safe(refusal_memory.is_enabled, False),
+                "PAL_CLASSIFIER": _safe(classifier.is_enabled, False),
+                "PAL_EPISODE_STORE": _safe(episode_store.is_enabled, False),
+                "PAL_BANDIT": _safe(bandit.is_enabled, False),
+                "PAL_FALLBACK": _safe(fallback_chain.is_enabled, False),
+                "PAL_GUARDRAIL": _safe(guardrail.is_enabled, False),
+                "PAL_HEADROOM": _safe(headroom_adapter.is_enabled, False),
+                "PAL_DEBATE": _safe(debate.is_enabled, False),
+            },
+            "self_heal_alias_log": str(self_heal.DRIFT_LOG),
+            "health": _safe(health_probe.snapshot, {}),
+            "quota": _safe(_quota_view, None),
+            "rate_limit": _safe(rate_limit.snapshot, {}),
+            "breaker": _safe(refusal_memory.snapshot, {}),
+            "fallback": _safe(_fallback_view, None),
+            "size_guard": _safe(_size_guard_view, None),
+            "guardrail": _safe(_guardrail_view, None),
+            "headroom": _safe(_headroom_view, None),
+            "catalog": _safe(_catalog_view, None),
+            "tool_pool": _safe(_tool_pool_view, None),
+            "debate": _safe(_debate_view, None),
+            "cache": _safe(response_cache.snapshot, {}),
+            "refusals": _safe(refusal_memory.snapshot, {}),
+            "episodes": _safe(_episodes_view, None),
+            "bandit": _safe(_bandit_view, None),
+            "toolbelt": _safe(_toolbelt, {"note": "toolbelt import failed"}),
+        }
+    )
 
 
 SECTIONS = (
-    "health", "quota", "rate_limit", "cache", "breaker", "refusals", "fallback", "size_guard",
-    "guardrail", "headroom", "catalog", "tool_pool", "debate", "episodes", "bandit", "toolbelt",
+    "health",
+    "quota",
+    "rate_limit",
+    "cache",
+    "breaker",
+    "refusals",
+    "fallback",
+    "size_guard",
+    "guardrail",
+    "headroom",
+    "catalog",
+    "tool_pool",
+    "debate",
+    "episodes",
+    "bandit",
+    "toolbelt",
 )
 
 

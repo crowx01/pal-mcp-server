@@ -108,8 +108,7 @@ def _extract(result) -> tuple[str, str | None]:
             elif obj.get("status") == "files_required_to_continue":
                 # a workflow envelope leaked into a plain chat; show its ask, not JSON
                 parts.append(
-                    "(the model wanted to see files) "
-                    + str(obj.get("mandatory_instructions", "no answer")).strip()
+                    "(the model wanted to see files) " + str(obj.get("mandatory_instructions", "no answer")).strip()
                 )
             else:
                 parts.append(text)
@@ -283,7 +282,7 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
             # (head) and the most recent tool output (tail), drop the middle.
             if len(convo) > budget:
                 head = convo[: budget // 4]
-                tail = convo[-(budget * 3 // 4):]
+                tail = convo[-(budget * 3 // 4) :]
                 convo = head + "\n\n…[older tool output trimmed to fit token limit]…\n\n" + tail
             try:
                 resp = await asyncio.to_thread(
@@ -311,7 +310,8 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 transcript.append((name, args, res))
                 results.append(react.format_result(name, res))
             convo = (
-                f"{convo}\n\n{text}\n\n" + "\n".join(results)
+                f"{convo}\n\n{text}\n\n"
+                + "\n".join(results)
                 + "\n\nContinue: emit another <tool_call> if you need one, "
                 "otherwise give your final answer with NO tool_call."
             )
@@ -352,7 +352,7 @@ async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int 
 
 def _bubble(model: str, answer: str, *, role: str = "pal", color: str = "green") -> Panel:
     if answer.startswith("__ERROR__"):
-        body: object = Text(answer[len("__ERROR__"):], style="red")
+        body: object = Text(answer[len("__ERROR__") :], style="red")
         color = "red"
     else:
         body = Markdown(answer)
@@ -433,8 +433,10 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
     lines = Group(
         Text.assemble(("PAL", "bold cyan"), (" chat", "bold")),
         Text.assemble(
-            ("cheap ", "dim"), (str(cheap or "—"), "green"),
-            ("   smart ", "dim"), (str(smart or "—"), "magenta"),
+            ("cheap ", "dim"),
+            (str(cheap or "—"), "green"),
+            ("   smart ", "dim"),
+            (str(smart or "—"), "magenta"),
         ),
         Text(
             "message (auto cheap/smart) · /tools <task> (any command on Kali) · /tools:ro (read-only)",
@@ -508,7 +510,7 @@ async def _run(handle):
 
         # /delegate <model> <question>
         if low.startswith("/delegate"):
-            rest = line[len("/delegate"):].strip().split(maxsplit=1)
+            rest = line[len("/delegate") :].strip().split(maxsplit=1)
             if len(rest) < 2:
                 console.print("[dim]usage: /delegate <model> <question>[/]")
                 continue
@@ -533,17 +535,20 @@ async def _run(handle):
                 continue
             label = {"default": "read-only", "edit": "EDIT", "planner": "plan", "codereviewer": "review"}[role]
             if role == "edit" and not agent_warned:
-                console.print(Panel(
-                    Text.assemble(
-                        ("⚠ /agent:edit runs the local ", "yellow"),
-                        ("claude", "bold yellow"),
-                        (" CLI with ", "yellow"),
-                        ("acceptEdits", "bold red"),
-                        (f" — it can run commands and EDIT files under\n{cwd}\n", "yellow"),
-                        ("plain /agent is read-only (edits blocked).", "dim"),
-                    ),
-                    border_style="yellow", padding=(0, 1),
-                ))
+                console.print(
+                    Panel(
+                        Text.assemble(
+                            ("⚠ /agent:edit runs the local ", "yellow"),
+                            ("claude", "bold yellow"),
+                            (" CLI with ", "yellow"),
+                            ("acceptEdits", "bold red"),
+                            (f" — it can run commands and EDIT files under\n{cwd}\n", "yellow"),
+                            ("plain /agent is read-only (edits blocked).", "dim"),
+                        ),
+                        border_style="yellow",
+                        padding=(0, 1),
+                    )
+                )
                 agent_warned = True
             with console.status(f"[dim]claude agent ({label}) working…[/]", spinner="dots"):
                 ans = await _ask_agent(handle, task, cwd, role)
@@ -558,7 +563,9 @@ async def _run(handle):
             full = suffix not in ("ro", "readonly", "safe")  # default = full power
             task = task.strip()
             if not task:
-                console.print("[dim]usage: /tools <task> (full: any command — nmap, burpsuite, …) · /tools:ro <task> (read-only)[/]")
+                console.print(
+                    "[dim]usage: /tools <task> (full: any command — nmap, burpsuite, …) · /tools:ro <task> (read-only)[/]"
+                )
                 continue
             from providers.router import tools_pool
 
@@ -575,15 +582,18 @@ async def _run(handle):
                 console.print("[red]no model available — check `pal diag`[/]")
                 continue
             if full and not tools_full_warned:
-                console.print(Panel(
-                    Text.assemble(
-                        ("⚠ /tools runs ANY shell command on this box by default", "bold yellow"),
-                        (" (nmap, nuclei, sqlmap, rm, …).\n", "yellow"),
-                        (f"Only use on systems you are authorized to test. cwd: {cwd}\n", "yellow"),
-                        ("Use /tools:ro for a read-only session.", "dim"),
-                    ),
-                    border_style="red", padding=(0, 1),
-                ))
+                console.print(
+                    Panel(
+                        Text.assemble(
+                            ("⚠ /tools runs ANY shell command on this box by default", "bold yellow"),
+                            (" (nmap, nuclei, sqlmap, rm, …).\n", "yellow"),
+                            (f"Only use on systems you are authorized to test. cwd: {cwd}\n", "yellow"),
+                            ("Use /tools:ro for a read-only session.", "dim"),
+                        ),
+                        border_style="red",
+                        padding=(0, 1),
+                    )
+                )
                 tools_full_warned = True
             mode = "full: any command" if full else "read-only: bash·read_file·write_file·web_fetch·gh"
             console.print(f"[dim]→ pool: {', '.join(pool)} ({mode})[/]")
@@ -604,7 +614,7 @@ async def _run(handle):
 
         # /debate <question> -> one model READS the files, then the panel decides
         if low.startswith("/debate"):
-            q = line[len("/debate"):].strip()
+            q = line[len("/debate") :].strip()
             if not q:
                 console.print("[dim]usage: /debate <question>  — a reader gathers the files, then the panel decides[/]")
                 continue
@@ -645,11 +655,18 @@ async def _run(handle):
             legacy_panel = [m for m in ("gpt-oss-120b", "qwen3", "gpt-oss-20b") if _is_available(m)]
             panel = list(dict.fromkeys(reasoner_pool[:3] + legacy_panel))[:3] or legacy_panel
             console.print(f"[dim]debate across {', '.join(panel)}[/]")
-            sys = _maybe_security(q, (
-                "You are one voice in a technical debate. Base your answer on the file "
-                "evidence provided. Give a clear, reasoned verdict in 3-6 sentences."
-            ))
-            ctx = f"File evidence gathered from the project:\n{digest}\n\n" if digest and not digest.startswith("__ERROR__") else ""
+            sys = _maybe_security(
+                q,
+                (
+                    "You are one voice in a technical debate. Base your answer on the file "
+                    "evidence provided. Give a clear, reasoned verdict in 3-6 sentences."
+                ),
+            )
+            ctx = (
+                f"File evidence gathered from the project:\n{digest}\n\n"
+                if digest and not digest.startswith("__ERROR__")
+                else ""
+            )
             for m in panel:
                 with console.status(f"[dim]{m} deciding…[/]", spinner="dots"):
                     ans = await _ask_direct(m, f"{ctx}Question: {q}\n\nYour verdict:", sys)
@@ -659,9 +676,9 @@ async def _run(handle):
         # /cheap or /smart force a tier
         forced = None
         if low.startswith("/cheap"):
-            forced, line = "cheap", line[len("/cheap"):].strip()
+            forced, line = "cheap", line[len("/cheap") :].strip()
         elif low.startswith("/smart"):
-            forced, line = "smart", line[len("/smart"):].strip()
+            forced, line = "smart", line[len("/smart") :].strip()
         if forced and not line:
             console.print(f"[dim]usage: /{forced} <question>[/]")
             continue
