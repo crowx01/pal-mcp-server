@@ -21,7 +21,7 @@ class CohereProvider(OpenAICompatibleProvider):
         return ProviderType.COHERE
 
     def _lookup_capabilities(self, canonical_name: str, requested_name: str | None = None):
-        if canonical_name and "/" not in canonical_name:
+        if canonical_name.startswith("command"):
             cap = ModelCapabilities(
                 provider=ProviderType.COHERE,
                 model_name=canonical_name,

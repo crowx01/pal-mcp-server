@@ -475,6 +475,8 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
 
 def _available_models() -> list[str]:
     """Available model ids for the /model picker (pool first, then a curated set)."""
+    from providers.registry import ModelProviderRegistry
+
     cands: list[str] = []
     try:
         from providers.router import tools_pool
@@ -486,7 +488,8 @@ def _available_models() -> list[str]:
         "gemini-3.5-flash-lite", "gemini-3.6-flash", "qwen3",
         "openai/gpt-oss-120b", "openai/gpt-oss-20b", "command-r-08-2024",
         "meta-llama/Llama-3.1-8B-Instruct", "deepseek-ai/DeepSeek-V4.1-Flash",
-        "openrouter/free", "nemotron-3-nano:30b", "DeepSeek-V4-Flash-0731",
+        "openrouter/free", "nemotron-3-nano:30b", "auto",
+        "aion-labs/aion-rp-llama-3.1-8b",
     ]
     seen: set[str] = set()
     out: list[str] = []
@@ -495,8 +498,15 @@ def _available_models() -> list[str]:
             continue
         seen.add(m)
         try:
-            if _is_available(m):
-                out.append(m)
+            if not _is_available(m):
+                continue
+            # keep only models that resolve to a real provider that is NOT the
+            # empty-balance OpenRouter catch-all (so dead / mis-routed ids -- e.g.
+            # nvidia/...:free, nemotron -- never appear).
+            prov = ModelProviderRegistry.get_provider_for_model(m)
+            if prov is None or type(prov).__name__ == "OpenRouterProvider":
+                continue
+            out.append(m)
         except Exception:
             pass
     return out
