@@ -92,7 +92,9 @@ def is_enabled() -> bool:
 
 
 def _min_bytes() -> int:
-    return int(os.getenv("PAL_HEADROOM_MIN_BYTES", "4000"))
+    # Headroom-ultra compresses smaller blobs too (lower threshold by default).
+    default = "200" if os.getenv("PAL_HEADROOM_MODE", "").lower() == "ultra" else "4000"
+    return int(os.getenv("PAL_HEADROOM_MIN_BYTES", default))
 
 
 def _keep_head() -> int:

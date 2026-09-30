@@ -36,9 +36,19 @@ def generate(
     Returns the ModelResponse on success; raises on total fallback exhaustion.
     """
     from providers.registry import ModelProviderRegistry
-    from providers.router import episode_store, refusal_memory
+
+    # Caveman-ultra: prepend a compression instruction so plain chat responses
+    # are maximally compressed. NEVER for tool/mission/debate calls, where the
+    # model must emit exact tool-call / structured syntax (compressing that
+    # breaks execution, e.g. gpt-oss narrating "wrote file" without a real call).
+    from providers.router import caveman, episode_store, refusal_memory
     from providers.router.fallback_chain import call_with_fallback
     from providers.router.size_guard import check_or_reroute
+
+    if caveman.is_enabled() and category not in ("tools", "mission", "debate"):
+        _cv = caveman.system_prefix()
+        if _cv:
+            system = (_cv + "\n\n" + system) if system else _cv
 
     dispatch_model = model
     ok, hint = check_or_reroute(dispatch_model, prompt)
