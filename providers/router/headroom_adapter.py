@@ -395,6 +395,37 @@ _COMPRESSORS = {
 _PROSE_KINDS = ("log", "text")
 
 
+
+# ---- real Headroom (headroom-ai) SmartCrusher backend ---------------------
+_SMARTCRUSHER = None
+
+
+def _headroom_crush(text: str) -> str | None:
+    """Compress a blob with the real Headroom SmartCrusher (headroom-ai).
+
+    Returns the compressed string when it is genuinely smaller, else None so the
+    caller falls back to the proxy / homegrown summarisers (fail-open). Disable
+    with PAL_HEADROOM_ENGINE=local.
+    """
+    if os.getenv("PAL_HEADROOM_ENGINE", "headroom").lower() != "headroom":
+        return None
+    global _SMARTCRUSHER
+    try:
+        if _SMARTCRUSHER is None:
+            from headroom import SmartCrusher
+
+            _SMARTCRUSHER = SmartCrusher()
+        r = _SMARTCRUSHER.crush(text)
+        comp = getattr(r, "compressed", None)
+        if comp and getattr(r, "was_modified", False) and len(comp) < len(text):
+            with _STATS_LOCK:
+                _STATS["headroom_used"] = _STATS.get("headroom_used", 0) + 1
+            return comp
+    except Exception as exc:  # fail-open
+        log.debug("headroom: SmartCrusher failed open: %s", exc.__class__.__name__)
+    return None
+
+
 def compress_tool_result(text: str, tool_name: str | None = None, structured_only: bool = False) -> str:
     """Compress a single tool result blob (stdout/response body). Returns the
     text unchanged if headroom is disabled, the blob is small, marked
@@ -424,8 +455,12 @@ def compress_tool_result(text: str, tool_name: str | None = None, structured_onl
         kind = _detect_kind(text)
         if structured_only and kind in _PROSE_KINDS:
             return text
-        proxied = _proxy_compress(text, kind)
-        summary = proxied if proxied is not None else _COMPRESSORS.get(kind, _compress_text)(text)
+        crushed = _headroom_crush(text)
+        if crushed is not None:
+            summary = crushed
+        else:
+            proxied = _proxy_compress(text, kind)
+            summary = proxied if proxied is not None else _COMPRESSORS.get(kind, _compress_text)(text)
 
         if len(summary) >= len(text):
             # never let a "compressor" grow the payload
