@@ -23,7 +23,7 @@ class HuggingFaceProvider(OpenAICompatibleProvider):
         return ProviderType.HUGGINGFACE
 
     def _lookup_capabilities(self, canonical_name: str, requested_name: str | None = None):
-        if "/" in canonical_name:
+        if "/" in canonical_name and ":" not in canonical_name:
             cap = ModelCapabilities(
                 provider=ProviderType.HUGGINGFACE,
                 model_name=canonical_name,
