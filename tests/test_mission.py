@@ -106,3 +106,22 @@ def test_single_mode_completes_when_artifact_exists(monkeypatch, tmp_path):
     res = asyncio.run(mission.run_mission(f"write ok to {target}", auto=True))
     assert res["mode"] == "single"
     assert res["status"] == "COMPLETE"  # artifact exists despite max-steps
+
+
+def test_execute_plan_applies_edits(tmp_path):
+    import asyncio as _a
+    f = tmp_path / "mod.py"
+    f.write_text("x = 1\ny = 2\n")
+    plan = {"edits": [{"path": str(f), "old": "x = 1", "new": "x = 42"}], "files": [], "commands": []}
+    rep = _a.run(mission._execute_plan(plan, "e", False))
+    assert str(f) in rep["edits_applied"]
+    assert f.read_text() == "x = 42\ny = 2\n"
+
+
+def test_execute_plan_edit_miss_recorded(tmp_path):
+    import asyncio as _a
+    f = tmp_path / "mod.py"
+    f.write_text("a = 1\n")
+    plan = {"edits": [{"path": str(f), "old": "NOTHERE", "new": "z"}], "files": [], "commands": []}
+    rep = _a.run(mission._execute_plan(plan, "e", False))
+    assert rep["edits_failed"] and f.read_text() == "a = 1\n"

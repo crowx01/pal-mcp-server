@@ -26,11 +26,15 @@ log = logging.getLogger(__name__)
 _TYPES = ("code", "recon", "fileops", "analysis", "general")
 
 _WRITER_SYS = (
-    "You are the WRITER sub-agent of a mission. Do NOT run tools. Given the "
-    "mission, acceptance criteria and any feedback, output ONLY one JSON object:\n"
-    '{"files":[{"path":"...","content":"..."}],"commands":["..."],'
-    '"rationale":"...","done_hint":false}\n'
-    "File contents must be complete. Commands are plain bash run on Kali."
+    "You are the WRITER sub-agent of a mission. Do NOT run tools. You are shown "
+    "the current content of relevant repo files under REPO CONTEXT. Given the "
+    "mission, acceptance criteria and feedback, output ONLY one JSON object:\n"
+    '{"files":[{"path":"...","content":"..."}],'
+    '"edits":[{"path":"...","old":"exact snippet from the file","new":"replacement"}],'
+    '"commands":["..."],"rationale":"...","done_hint":false}\n'
+    "Use edits to MODIFY existing files: old must match the current file text "
+    "exactly and be small+unique; use files only for NEW files; commands run bash "
+    "on Kali. Preserve all unrelated code."
 )
 _REVIEWER_SYS = (
     "You are a REVIEWER sub-agent. Given the mission, the writer's plan and the "
@@ -165,10 +169,78 @@ def _executor_pool(mtype: str) -> list[str]:
     return _env_models("PAL_MISSION_EXECUTOR_MODELS", default)
 
 
+def _repo_context(goal: str, max_bytes: int = 8000) -> str:
+    """Current content of repo files relevant to the goal (headroom-compressed),
+    so the writer modifies real code instead of guessing."""
+    import subprocess
+
+    files: list[str] = []
+    for p in re.findall(r"(/[\w./\-]+\.(?:py|json|md|txt|toml|cfg))", goal):
+        if os.path.isfile(p) and p not in files:
+            files.append(p)
+    root = None
+    rm = re.search(r"(/[\w./\-]+?pal-mcp-server)\b", goal)
+    if rm and os.path.isdir(rm.group(1)):
+        root = rm.group(1)
+    if root:
+        symbols = set(re.findall(r"\b([a-z]+_[a-z_]+|[A-Za-z]+[A-Z][A-Za-z]+)\b", goal))
+        for sym in list(symbols)[:8]:
+            try:
+                targets = [os.path.join(root, "providers"), os.path.join(root, "conf"),
+                           os.path.join(root, "server.py"), os.path.join(root, "cli.py")]
+                targets = [t for t in targets if os.path.exists(t)]
+                out = subprocess.run(
+                    ["grep", "-rlw", "--include=*.py", "--exclude-dir=.pal_venv",
+                     "--exclude-dir=zen-mcp-server", "--exclude-dir=__pycache__",
+                     "--exclude-dir=node_modules", "--exclude-dir=tests", sym, *targets],
+                    capture_output=True, text=True, timeout=8).stdout
+                for hit in out.split()[:2]:
+                    if hit not in files:
+                        files.append(hit)
+            except Exception:
+                pass
+            if len(files) >= 6:
+                break
+    try:
+        from headroom import SmartCrusher
+        sc = SmartCrusher()
+    except Exception:
+        sc = None
+    parts, total = [], 0
+    for fp in files[:6]:
+        try:
+            c = open(fp).read()
+            if sc:
+                r = sc.crush(c)
+                if getattr(r, "was_modified", False) and len(r.compressed) < len(c):
+                    c = r.compressed
+            c = c[:3000]
+            parts.append(f"--- FILE {fp} ---\n{c}")
+            total += len(c)
+            if total >= max_bytes:
+                break
+        except Exception:
+            pass
+    return "\n\n".join(parts)
+
+
 async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
     from providers.router import chat_repl
 
-    report: dict = {"files_written": [], "results": []}
+    report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": []}
+    for e in plan.get("edits", []) or []:
+        path, old, new = e.get("path"), e.get("old"), e.get("new")
+        if path and old is not None and os.path.isfile(path):
+            try:
+                cur = open(path).read()
+                if old in cur:
+                    with open(path, "w") as fh:
+                        fh.write(cur.replace(old, new or "", 1))
+                    report["edits_applied"].append(path)
+                else:
+                    report["edits_failed"].append({"path": path, "reason": "old snippet not found"})
+            except Exception as exc:
+                report["edits_failed"].append({"path": path, "reason": str(exc)[:80]})
     for entry in plan.get("files", []) or []:
         path, content = entry.get("path"), entry.get("content", "")
         if path:
@@ -245,10 +317,11 @@ async def run_mission(
     criteria = f"The mission is accomplished and verified on disk: {goal}"
     transcript: list[dict] = []
     feedback = ""
+    repo_ctx = _repo_context(goal)
     for iteration in range(1, max_iters + 1):
         wr = await asyncio.to_thread(
             dispatch.generate, writer,
-            f"MISSION: {goal}\nACCEPTANCE: {criteria}\nFEEDBACK: {feedback or '(none)'}",
+            f"REPO CONTEXT:\n{repo_ctx}\n\nMISSION: {goal}\nACCEPTANCE: {criteria}\nFEEDBACK: {feedback or '(none)'}",
             _WRITER_SYS, temperature=0.2, category="mission", tool="mission",
             max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
         )
