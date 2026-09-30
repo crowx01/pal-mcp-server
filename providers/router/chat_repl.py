@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import sys
 
 from rich.console import Console, Group
 from rich.markdown import Markdown
@@ -453,7 +454,7 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
             (str(smart or "—"), "magenta"),
         ),
         Text(
-            "message (auto cheap/smart) · /tools <task> (any command on Kali) · /tools:ro (read-only)",
+            "message = RUNS with full tools on Kali (no /tools needed) · /ask <q> = plain chat",
             style="dim",
         ),
         Text(
@@ -461,7 +462,7 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
             style="dim",
         ),
         Text(
-            "/models (capability catalog) · /smart · /cheap · /model · /help · /exit",
+            "/model (pick model) · /models (catalog) · /ask · /cheap · /smart · /agent · /help · /exit",
             style="dim",
         ),
         Text(
@@ -472,6 +473,61 @@ def _header(cheap: str | None, smart: str | None) -> Panel:
     return Panel(lines, border_style="cyan", padding=(0, 1))
 
 
+def _available_models() -> list[str]:
+    """Available model ids for the /model picker (pool first, then a curated set)."""
+    cands: list[str] = []
+    try:
+        from providers.router import tools_pool
+
+        cands += tools_pool.select_pool("tool_executor", "", is_available=_is_available)
+    except Exception:
+        pass
+    cands += [
+        "gemini-3.5-flash-lite", "gemini-3.6-flash", "qwen3",
+        "openai/gpt-oss-120b", "openai/gpt-oss-20b", "command-r-08-2024",
+        "meta-llama/Llama-3.1-8B-Instruct", "deepseek-ai/DeepSeek-V4.1-Flash",
+        "openrouter/free", "nemotron-3-nano:30b", "DeepSeek-V4-Flash-0731",
+    ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in cands:
+        if m in seen:
+            continue
+        seen.add(m)
+        try:
+            if _is_available(m):
+                out.append(m)
+        except Exception:
+            pass
+    return out
+
+
+async def _pick_model_menu(session, cwd, current):
+    """Show a numbered menu of available models; return the chosen id (or None for auto)."""
+    models = _available_models()
+    if not models:
+        console.print("[red]no models available — check `pal diag`[/]")
+        return current
+    console.print("[bold cyan]Pick a model[/] [dim](type the number, Enter to keep)[/]")
+    console.print("   [cyan]0[/]. auto (cheap/smart routing)")
+    for i, m in enumerate(models, 1):
+        mark = "  [green]● current[/]" if m == current else ""
+        console.print(f"  [cyan]{i:>2}[/]. {m}{mark}")
+    try:
+        sel = (await _read_line(session, cwd) or "").strip()
+    except (EOFError, KeyboardInterrupt):
+        return current
+    if sel == "0":
+        console.print("[dim]model: auto[/]")
+        return None
+    if sel.isdigit() and 1 <= int(sel) <= len(models):
+        chosen = models[int(sel) - 1]
+        console.print(f"[dim]model set to [magenta]{chosen}[/][/]")
+        return chosen
+    console.print("[dim](unchanged)[/]")
+    return current
+
+
 async def _run(handle):
     from providers.router import chat_router
 
@@ -479,11 +535,12 @@ async def _run(handle):
     cont: str | None = None
     agent_warned = False
     tools_full_warned = False
+    selected_model: str | None = None  # set via /model; forces this model for every message
     r0 = chat_router.route("hi", _is_available)
     console.print(_header(r0["cheap"], r0["smart"]))
 
     session = None
-    if _PT_OK:
+    if _PT_OK and sys.stdin.isatty():
         try:
             session_id = chat_history.new_session_id()
             session = _build_prompt_session(session_id)
@@ -506,9 +563,8 @@ async def _run(handle):
         if low in ("/help", "/h", "?"):
             console.print(_header(r0["cheap"], r0["smart"]))
             continue
-        if low == "/model":
-            r = chat_router.route("hi", _is_available)
-            console.print(f"[dim]cheap=[green]{r['cheap']}[/]  smart=[magenta]{r['smart']}[/][/]")
+        if low in ("/model", "/pick"):
+            selected_model = await _pick_model_menu(session, cwd, selected_model)
             continue
         if low == "/models":
             with console.status("[dim]building model catalog…[/]", spinner="dots"):
@@ -669,7 +725,7 @@ async def _run(handle):
             legacy_panel = [m for m in ("gpt-oss-120b", "qwen3", "gpt-oss-20b") if _is_available(m)]
             panel = list(dict.fromkeys(reasoner_pool[:3] + legacy_panel))[:3] or legacy_panel
             console.print(f"[dim]debate across {', '.join(panel)}[/]")
-            sys = _maybe_security(
+            debate_sys = _maybe_security(
                 q,
                 (
                     "You are one voice in a technical debate. Base your answer on the file "
@@ -683,34 +739,75 @@ async def _run(handle):
             )
             for m in panel:
                 with console.status(f"[dim]{m} deciding…[/]", spinner="dots"):
-                    ans = await _ask_direct(m, f"{ctx}Question: {q}\n\nYour verdict:", sys)
+                    ans = await _ask_direct(m, f"{ctx}Question: {q}\n\nYour verdict:", debate_sys)
                 console.print(_bubble(m, ans, role="debate", color="yellow"))
             continue
 
-        # /cheap or /smart force a tier
+        # /ask, /cheap, /smart -> a PLAIN chat answer (no tools) for one message
         forced = None
-        if low.startswith("/cheap"):
+        if low.startswith("/ask"):
+            forced, line = "ask", line[len("/ask") :].strip()
+        elif low.startswith("/cheap"):
             forced, line = "cheap", line[len("/cheap") :].strip()
         elif low.startswith("/smart"):
             forced, line = "smart", line[len("/smart") :].strip()
         if forced and not line:
-            console.print(f"[dim]usage: /{forced} <question>[/]")
+            console.print(f"[dim]usage: /{forced} <question> (plain chat, no tools)[/]")
+            continue
+        if forced:
+            r = chat_router.route(line, _is_available)
+            if forced == "cheap":
+                r["model"] = r["cheap"]
+            elif forced == "smart":
+                r["model"] = r["smart"]
+            model = selected_model or r["model"]
+            if not model:
+                console.print("[red]no model available — `pal diag`[/]")
+                continue
+            console.print(f"[dim]→ {model} (chat)[/]")
+            with console.status(f"[dim]{model} thinking…[/]", spinner="dots"):
+                ans, cont = await _ask(
+                    handle, line, model, cwd, cont,
+                    role=(forced if forced in ("cheap", "smart") else None),
+                )
+            console.print(_bubble(model, ans))
             continue
 
-        # normal auto-routed message
-        r = chat_router.route(line, _is_available)
-        if forced == "cheap":
-            r["model"], r["reason"] = r["cheap"], "forced cheap"
-        elif forced == "smart":
-            r["model"], r["reason"] = r["smart"], "forced smart"
-        if not r["model"]:
-            console.print("[red]no model available — check API keys with `pal diag`[/]")
+        # DEFAULT: every plain message EXECUTES with tools on Kali -- no /tools
+        # prefix needed. Pick the selected model (if set via /model) else a pool.
+        from providers.router import tools_pool
+
+        if selected_model:
+            pool = [selected_model]
+        else:
+            pool = tools_pool.select_pool("tool_executor", line, is_available=_is_available)
+            if not pool:
+                r = chat_router.route(line, _is_available)
+                pool = [r["model"]] if r["model"] else []
+        if not pool or not pool[0]:
+            console.print("[red]no model available — check `pal diag`[/]")
             continue
-        console.print(f"[dim]→ {r['model']}  ·  {r['tier']}: {r['reason']}[/]")
-        msg_role = forced or r["tier"]  # cheap/smart role per this query's routing
-        with console.status(f"[dim]{r['model']} thinking…[/]", spinner="dots"):
-            ans, cont = await _ask(handle, line, r["model"], cwd, cont, role=msg_role)
-        console.print(_bubble(r["model"], ans))
+        if not tools_full_warned:
+            console.print(
+                Panel(
+                    Text.assemble(
+                        ("⚠ every message now runs with FULL tools on this box", "bold yellow"),
+                        (" (any shell command — nmap, rm, …).\n", "yellow"),
+                        ("Use /ask <q> for plain chat · /model to pick a model · only on authorized systems.\n", "dim"),
+                        (f"cwd: {cwd}", "dim"),
+                    ),
+                    border_style="red",
+                    padding=(0, 1),
+                )
+            )
+            tools_full_warned = True
+        console.print(f"[dim]→ {pool[0]} · tools (full)[/]")
+        with console.status(f"[dim]{pool[0]} using tools…[/]", spinner="dots"):
+            ans, transcript, used = await _tools_loop_pool(line, pool, cwd, max_steps=8, full=True)
+        for name, args, _res in transcript:
+            shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
+            console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
+        console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
 
 
 def _quiet_logging() -> None:
