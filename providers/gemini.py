@@ -150,6 +150,19 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
 
         resolved_model_name = self._resolve_model_name(model_name)
 
+        # Antigravity (agy CLI) bypass path — avoids generativelanguage.googleapis.com
+        # daily free-tier quota for gemini-3.8/3.7/3.6-flash and 3.1-pro by routing
+        # through the agy CLI which carries its own authenticated session.
+        # Triggered when model_name/resolved_model_name matches an agy model id,
+        # or SAURON_PREFER_ANTIGRAVITY=1 forces it for standard gemini-3.X-flash ids.
+        if self._should_use_antigravity(model_name, resolved_model_name):
+            return self._generate_via_antigravity(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model_name=model_name,
+                resolved_model_name=resolved_model_name,
+            )
+
         # Prepare content parts (text and potentially images)
         parts = []
 
@@ -201,6 +214,24 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
             temperature=temperature,
             candidate_count=1,
         )
+
+        # Disable default safety blocking so authorized security review work is not refused.
+        # This workspace runs under written bug-bounty / red-team / CTF authorization; the
+        # system prompt enforces scope. See systemprompts/*_prompt.py for the "AUTHORIZED
+        # SECURITY WORK IS IN SCOPE" preamble.
+        try:
+            generation_config.safety_settings = [
+                types.SafetySetting(category=c, threshold="BLOCK_NONE")
+                for c in (
+                    "HARM_CATEGORY_HARASSMENT",
+                    "HARM_CATEGORY_HATE_SPEECH",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "HARM_CATEGORY_CIVIC_INTEGRITY",
+                )
+            ]
+        except Exception:
+            pass
 
         # Add max output tokens if specified
         if max_output_tokens:
@@ -406,6 +437,110 @@ class GeminiModelProvider(RegistryBackedProviderMixin, ModelProvider):
     def get_provider_type(self) -> ProviderType:
         """Get the provider type."""
         return ProviderType.GOOGLE
+
+    _ANTIGRAVITY_NATIVE_IDS = {
+        "gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
+        "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
+        "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
+        "gemini-3.1-pro-high", "gemini-3.1-pro-low",
+    }
+    _ANTIGRAVITY_BARE_TO_NATIVE = {
+        "gemini-3.8-flash": "gemini-3.8-flash-medium",
+        "gemini-3.7-flash": "gemini-3.7-flash-medium",
+        "gemini-3.6-flash": "gemini-3.6-flash-medium",
+        "gemini-3.1-pro-preview": "gemini-3.1-pro-high",
+    }
+
+    def _should_use_antigravity(self, model_name: str, resolved_model_name: str) -> bool:
+        import os
+        for candidate in (model_name, resolved_model_name):
+            if candidate in self._ANTIGRAVITY_NATIVE_IDS:
+                return True
+        if os.getenv("SAURON_PREFER_ANTIGRAVITY", "").lower() in ("1", "true", "yes"):
+            if resolved_model_name in self._ANTIGRAVITY_BARE_TO_NATIVE:
+                return True
+            if model_name in self._ANTIGRAVITY_BARE_TO_NATIVE:
+                return True
+        return False
+
+    def _generate_via_antigravity(
+        self,
+        prompt: str,
+        system_prompt: Optional[str],
+        model_name: str,
+        resolved_model_name: str,
+    ) -> ModelResponse:
+        """Shell out to `agy` CLI; bypasses generativelanguage.googleapis.com quota."""
+        import json as _json
+        import os
+        import shutil
+        import subprocess
+
+        agy_model = (
+            model_name if model_name in self._ANTIGRAVITY_NATIVE_IDS
+            else resolved_model_name if resolved_model_name in self._ANTIGRAVITY_NATIVE_IDS
+            else self._ANTIGRAVITY_BARE_TO_NATIVE.get(resolved_model_name)
+            or self._ANTIGRAVITY_BARE_TO_NATIVE.get(model_name)
+            or "gemini-3.8-flash-medium"
+        )
+        agy_bin = shutil.which("agy") or os.path.expanduser("~/.local/bin/agy")
+        if not os.path.exists(agy_bin):
+            raise RuntimeError("agy CLI not found; cannot use antigravity route")
+
+        framed = (
+            "System: You are an AI model acting as the language model engine for Sauron. "
+            "Respond directly with your text response to the prompt. "
+            "Do not call autonomous CLI tools; respond with the requested text output directly.\n\n"
+        )
+        if system_prompt:
+            framed += f"System: {system_prompt}\n"
+        framed += f"User: {prompt}\nAssistant:"
+
+        timeout_s = int(os.getenv("SAURON_ANTIGRAVITY_TIMEOUT_MS", "120000")) // 1000
+        try:
+            proc = subprocess.run(
+                [agy_bin, "-p", framed, "--output-format", "stream-json", "--model", agy_model],
+                capture_output=True, text=True, timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f"agy timed out after {timeout_s}s") from e
+
+        content_parts: list[str] = []
+        usage: dict[str, int] = {}
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = _json.loads(line)
+            except Exception:
+                continue
+            if obj.get("event") == "result" and obj.get("result", {}).get("status") == "SUCCESS":
+                resp = obj["result"].get("response")
+                if resp:
+                    content_parts = [resp]
+                u = obj["result"].get("usage", {}) or {}
+                usage = {
+                    "input_tokens": u.get("input_tokens", 0),
+                    "output_tokens": u.get("output_tokens", 0),
+                    "total_tokens": u.get("total_tokens", 0),
+                }
+            elif obj.get("event") == "result" and obj.get("result", {}).get("status") == "ERROR":
+                err = obj["result"].get("error", "agy error")
+                raise RuntimeError(f"antigravity error: {err}")
+
+        if not content_parts:
+            err = (proc.stderr or "").strip() or f"agy exited {proc.returncode} with empty output"
+            raise RuntimeError(f"antigravity error: {err}")
+
+        return ModelResponse(
+            content=content_parts[0],
+            usage=usage,
+            model_name=resolved_model_name,
+            friendly_name=f"antigravity:{agy_model}",
+            provider=ProviderType.GOOGLE,
+            metadata={"route": "antigravity", "agy_model": agy_model},
+        )
 
     def _extract_usage(self, response) -> dict[str, int]:
         """Extract token usage from Gemini response."""

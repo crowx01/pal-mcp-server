@@ -62,7 +62,35 @@ async def run_task(
     if not m:
         return {"task": task, "mode": "tools", "result": "__ERROR__no model available"}
     steps = max_steps if max_steps else (8 if full else 5)
-    ans, transcript = await chat_repl._tools_loop(task, m, cwd, max_steps=steps, full=full)
+
+    # A2: size guard — if the task is too large for this model's input cap,
+    # reroute to a bigger-context same-category (or global-fallback) model.
+    from providers.router import size_guard
+
+    ok, hint = size_guard.check_or_reroute(m, task)
+    if not ok and hint and hint.startswith("route:"):
+        alt = hint.split(":", 1)[1]
+        if alt and alt not in ("none", "None"):
+            m = alt
+
+    # A1: failover across the model's same-category chain. dispatch.generate
+    # already does per-call fallback, but _tools_loop CATCHES a provider error
+    # and RETURNS ("__ERROR__…", transcript) instead of raising — so if a whole
+    # loop dies on an exhausted provider we retry the next model here. Errors
+    # that are not provider/rate issues (no tools, no provider) are not retried.
+    from providers.router import fallback_chain
+
+    candidates = [m]
+    if fallback_chain.is_enabled():
+        candidates += fallback_chain.chain_for(m)
+    _nonretry = ("no local tools enabled", "no provider for", "no model available")
+    ans = transcript = None
+    for cand in candidates:
+        ans, transcript = await chat_repl._tools_loop(task, cand, cwd, max_steps=steps, full=full)
+        m = cand
+        if isinstance(ans, str) and ans.startswith("__ERROR__") and not any(k in ans for k in _nonretry):
+            continue
+        break
     return {
         "task": task,
         "mode": "tools",
@@ -107,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ro", action="store_true", help="read-only tools (no arbitrary commands / edits)")
     ap.add_argument("--model", help="override the executor model")
     ap.add_argument("--plan", help="path to a plan file (one step per line, md bullets ok)")
+    ap.add_argument("--task-file", help="read the WHOLE file as ONE task (prose plan; unlike --plan which splits by line)")
     ap.add_argument("--max-steps", type=int, default=None, help="tool-call budget per task/step (default 8 full, 5 ro)")
     ap.add_argument("--agent-role", default=None, help="clink role for --agent (e.g. autonomous, edit, plan, review)")
     ap.add_argument("--json", action="store_true", help="emit structured JSON")
@@ -125,9 +154,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"### step {s['step']}: {s['task']}\n{s['result']}\n")
         return 0
 
-    if not args.task:
-        ap.error("provide a task, or use --plan <file>")
-    out = asyncio.run(run_task(args.task, mode=mode, model=args.model, full=full, max_steps=args.max_steps, agent_role=args.agent_role))
+    task_text = args.task
+    if args.task_file:
+        with open(args.task_file, encoding="utf-8") as fp:
+            task_text = fp.read().strip()
+    if not task_text:
+        ap.error("provide a task, or use --task-file <file> / --plan <file>")
+    out = asyncio.run(run_task(task_text, mode=mode, model=args.model, full=full, max_steps=args.max_steps, agent_role=args.agent_role))
     if args.json:
         print(json.dumps(out, indent=2, default=str))
     else:

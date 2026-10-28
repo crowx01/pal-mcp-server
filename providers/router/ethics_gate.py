@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 SENSITIVE_KEYWORDS = [
     "weapon",
     "exploit zero-day",

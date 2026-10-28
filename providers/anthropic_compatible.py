@@ -1,11 +1,11 @@
 """Anthropic-compatible API provider using Anthropic Messages wire format."""
 
 import logging
+
 import httpx
 
 from .base import ModelProvider
 from .shared import (
-    ModelCapabilities,
     ModelResponse,
     ProviderType,
 )

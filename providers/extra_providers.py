@@ -115,8 +115,13 @@ def register_extras(registry) -> None:
         log.debug("extra_providers: cannot read %s: %s", kf, exc)
         return
 
+    # Insert extras BEFORE these native providers so an extra's own (allowlisted)
+    # models win over a native provider that also claims them. CUSTOM (the groq
+    # flat-rate endpoint) aliases gpt-oss:120b/20b to its low-cap openai/gpt-oss-*;
+    # without CUSTOM here, Ollama Cloud's gpt-oss:120b wrongly resolves to groq
+    # (8000 TPM) and rate-limits. Extras have strict allowlists, so this is safe.
     insert_before = [ProviderType.OPENROUTER]
-    for nm in ("COHERE", "HUGGINGFACE"):
+    for nm in ("CUSTOM", "COHERE", "HUGGINGFACE"):
         if nm in ProviderType.__members__:
             insert_before.append(ProviderType[nm])
 

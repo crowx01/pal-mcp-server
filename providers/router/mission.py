@@ -100,7 +100,16 @@ def _extract_json(text: str) -> dict | None:
 
 def _heuristic_assess(goal: str) -> dict:
     g = goal.lower()
-    if any(w in g for w in ("nmap", "scan", "recon", "enumerate", "subdomain", "port", "exploit", "payload", "nuclei")):
+    # Only classify as recon when it is a GENUINE security action (verb+target),
+    # not when a security word is merely the object of a file/git op (e.g.
+    # "create a directory called enumeration").
+    try:
+        from providers.router import intent as _intent
+
+        _is_sec = _intent.classify_intent(goal).is_security
+    except Exception:
+        _is_sec = any(w in g for w in ("nmap", "scan", "recon", "enumerate", "subdomain", "port", "exploit", "payload", "nuclei"))
+    if _is_sec:
         typ = "recon"
     elif any(w in g for w in ("code", "function", "class", "refactor", "implement", "module", "script", "api", "bug", "test")):
         typ = "code"
@@ -229,6 +238,15 @@ def _is_protected(path: str) -> bool:
         return True
     if os.path.join(os.path.expanduser("~"), ".pal") in p and base.endswith(".json"):
         return True
+    # Unify with the executor's credential guard: *.pem/*.key/id_rsa/credentials*/
+    # secret*/engagement*/pentest-report* etc. are protected at the writer stage too.
+    try:
+        from providers.tooling import authz as _authz
+
+        if _authz.scan_name(path or ""):
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -285,7 +303,7 @@ async def run_panel(goal, models, judge, full):
                 max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
             )
             plan = _extract_json(getattr(wr, "content", "") or "") or {}
-            rep = await _execute_plan(plan, m, full)
+            rep = await _execute_plan(plan, m, full, goal=goal)
             return {"subtask": sub, "model": m, "exec": rep}
         except Exception as exc:
             return {"subtask": sub, "model": m, "error": str(exc)[:120]}
@@ -304,8 +322,21 @@ async def run_panel(goal, models, judge, full):
     }
 
 
-async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
+async def _execute_plan(plan: dict, executor: str, full: bool, goal: str = "") -> dict:
     from providers.router import chat_repl
+
+    # Pin the mission GOAL's authorization boundary for the whole plan so a
+    # writer-emitted command ("git add . && git push") inherits the goal's
+    # explicit file scope and cannot widen it (push_scope narrows-only).
+    _gtok = None
+    try:
+        from providers.router import intent as _intent
+        from providers.tooling import authz as _authz
+
+        if goal:
+            _gtok = _authz.push_scope(_intent.scope_for_request(goal, os.getcwd()))
+    except Exception:
+        _gtok = None
 
     report: dict = {"files_written": [], "edits_applied": [], "edits_failed": [], "results": []}
     for e in plan.get("edits", []) or []:
@@ -340,6 +371,13 @@ async def _execute_plan(plan: dict, executor: str, full: bool) -> dict:
             executor, os.getcwd(), max_steps=3, full=full,
         )
         report["results"].append({"cmd": cmd, "answer": (answer or "")[:600]})
+    if _gtok is not None:
+        try:
+            from providers.tooling import authz as _authz
+
+            _authz.pop_scope(_gtok)
+        except Exception:
+            pass
     return report
 
 
@@ -423,7 +461,7 @@ async def run_mission(
             max_output_tokens=int(os.getenv("PAL_TOOLS_MAX_TOKENS", "8192")),
         )
         plan = _extract_json(getattr(wr, "content", "") or "") or {}
-        report = await _execute_plan(plan, executor, full)
+        report = await _execute_plan(plan, executor, full, goal=goal)
 
         review_notes = []
         for rm in reviewer_models:

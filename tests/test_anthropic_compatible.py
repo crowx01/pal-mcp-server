@@ -1,5 +1,7 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from providers.anthropic_compatible import AnthropicCompatibleProvider
 from providers.shared.provider_type import ProviderType
 

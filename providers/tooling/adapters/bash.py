@@ -8,6 +8,14 @@ import subprocess
 from providers.tooling.toolbelt import ToolSpec, get_toolbelt
 
 _DEFAULT_ALLOW = "ls,cat,head,tail,grep,rg,find,jq,curl,gh,git,wc,awk,sed,file,stat,which"
+# git subcommands that do NOT mutate the working tree / repo / remote. In
+# read-only mode `git` is allow-listed for inspection ONLY; add/commit/push/etc.
+# are blocked here so read-only mode cannot stage or publish anything.
+_GIT_RO_SUBS = frozenset({
+    "status", "log", "diff", "show", "branch", "remote", "rev-parse", "rev-list",
+    "ls-files", "ls-tree", "cat-file", "describe", "shortlog", "blame", "config",
+    "for-each-ref", "symbolic-ref", "name-rev", "whatchanged", "reflog",
+})
 
 
 def _allowlist() -> tuple[str, ...]:
@@ -18,6 +26,33 @@ def _allowlist() -> tuple[str, ...]:
 
 def _unrestricted() -> bool:
     return os.getenv("PAL_BASH_UNRESTRICTED", "0") in ("1", "true", "yes")
+
+
+def _git_is_readonly(cmd: str) -> bool:
+    """True only if EVERY git invocation in a (possibly compound) command uses a
+    read-only subcommand. Unparseable git => not read-only (fail closed)."""
+    import re
+    import shlex
+
+    for seg in re.split(r"\s*(?:&&|\|\||\||;|\n)\s*", cmd):
+        if not re.search(r"\bgit\b", seg):
+            continue
+        try:
+            toks = shlex.split(seg, posix=True)
+        except ValueError:
+            return False
+        i = 0
+        while i < len(toks) and "=" in toks[i].split("/")[-1] and os.path.basename(toks[i]).split("=")[0].isidentifier():
+            i += 1
+        toks = toks[i:]
+        if not toks or os.path.basename(toks[0]) != "git":
+            continue
+        j = 1
+        while j < len(toks) and toks[j].startswith("-"):
+            j += 2 if toks[j] in ("-C", "-c", "--git-dir", "--work-tree", "--namespace") else 1
+        if j >= len(toks) or toks[j] not in _GIT_RO_SUBS:
+            return False
+    return True
 
 
 def _run(args: dict) -> str:
@@ -31,6 +66,12 @@ def _run(args: dict) -> str:
             return (
                 f"error: '{first}' is not in the read-only allowlist. "
                 "This is read-only /tools mode; use /tools:full to run arbitrary commands."
+            )
+        # git is allow-listed for INSPECTION only in read-only mode
+        if "git" in cmd.split() and not _git_is_readonly(cmd):
+            return (
+                "error: in read-only mode 'git' may only run inspection subcommands "
+                "(status/log/diff/show/…); staging, committing and pushing require full mode."
             )
     timeout = int(args.get("timeout_s", 30))
     try:

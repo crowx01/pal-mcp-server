@@ -62,6 +62,7 @@ from tools import (  # noqa: E402
     PrecommitTool,
     RefactorTool,
     SecauditTool,
+    SecSuiteTool,
     TestGenTool,
     ThinkDeepTool,
     TracerTool,
@@ -268,6 +269,7 @@ TOOLS = {
     "precommit": PrecommitTool(),  # Step-by-step pre-commit validation workflow
     "debug": DebugIssueTool(),  # Root cause analysis and debugging assistance
     "secaudit": SecauditTool(),  # Comprehensive security audit with OWASP Top 10 and compliance coverage
+    "secsuite": SecSuiteTool(),  # Burp-alternative security testing, HTTP repeater, JWT & traffic search
     "docgen": DocgenTool(),  # Step-by-step documentation generation with complexity analysis
     "analyze": AnalyzeTool(),  # General-purpose file and code analysis
     "refactor": RefactorTool(),  # Step-by-step refactoring analysis workflow with expert validation

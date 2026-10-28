@@ -120,9 +120,23 @@ class Toolbelt:
         if name not in self._enabled:
             return f"error: tool '{name}' is not enabled"
         spec = self._tools[name]
+        args = args or {}
         started = time.time()
+        # HARD AUTHORIZATION BOUNDARY — enforced below the LLM. Whatever the
+        # model reasoned, if this call exceeds the authorized scope (git scope
+        # expansion, publishing secrets, writing credentials) it NEVER runs.
         try:
-            out = spec.handler(args or {})
+            from providers.tooling import authz
+
+            denial = authz.enforce(name, args, authz.current_scope())
+        except Exception as exc:  # enforcement must never crash the call path
+            log.warning("authz gate error on %s: %s", name, exc)
+            denial = None
+        if denial:
+            self._audit(caller_model, name, args, denial, time.time() - started)
+            return denial
+        try:
+            out = spec.handler(args)
         except Exception as exc:
             out = f"error: {exc.__class__.__name__}: {exc}"
         dur = time.time() - started

@@ -1,5 +1,4 @@
 """Auto-learning + ethical safety cap in lesson_store."""
-import json
 from pathlib import Path
 
 import pytest

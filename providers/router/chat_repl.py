@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import sys
 
 from rich.console import Console, Group
@@ -69,6 +70,34 @@ _BOILERPLATE_MARKERS = (
 _TRAILING_RULE = re.compile(r"\n\s*-{2,}\s*$")
 # clink/agent runs append a machine <SUMMARY>…</SUMMARY> block; hide it
 _SUMMARY_RE = re.compile(r"\s*<SUMMARY>.*?</SUMMARY>\s*", re.DOTALL | re.IGNORECASE)
+
+
+# Reasoning-leak guard: some models (notably gpt-oss via Ollama/OpenAI-compat)
+# return their chain-of-thought in message.reasoning with content="" and emit no
+# tool_call. PAL's reasoning-field fallback then surfaces raw deliberation. Detect
+# that and re-prompt the model to act or answer. Disable with PAL_REASONING_GUARD=0.
+_REASONING_MARKERS = (
+    "we need to", "we can ", "we could", "we should", "we'll ", "we must",
+    "let's ", "i should", "i need to", "the user wants", "the user presumably",
+    "first, we", "then we", "maybe also", "we have to", "so we need",
+    "i think we", "might be heavy", "we need multiple", "we can combine",
+    "probably we", "let me outline", "we outline",
+)
+_REASONING_NUDGE = (
+    "\n\n(You output planning/reasoning but NO <tool_call> and no final answer. "
+    'Do EXACTLY ONE now: either emit a single <tool_call>{"name":"...","arguments":{...}}</tool_call> '
+    "to run the next concrete step, OR give your final answer as plain text. "
+    "Do NOT narrate your thinking — act or answer.)"
+)
+
+
+def _looks_like_reasoning(text: str) -> bool:
+    if os.getenv("PAL_REASONING_GUARD", "1").strip().lower() in ("0", "false", "off", "no"):
+        return False
+    t = (text or "").lower()
+    if len(t) < 200:  # short replies are real answers, never nudge them
+        return False
+    return sum(1 for m in _REASONING_MARKERS if m in t) >= 2
 
 
 def _clean(text: str) -> str:
@@ -220,13 +249,15 @@ _SECURITY_PREAMBLE = (
 
 
 def _maybe_security(task: str, system: str) -> str:
-    """Prepend an authorization preamble when the task is security-classified,
-    so funded models (gpt-oss/qwen) don't reflexively refuse authorized recon.
+    """Prepend the authorization preamble ONLY when the task is a genuine
+    security action (a security verb against a target) — not merely because a
+    security keyword appears as a filename/dirname/commit object. This stops
+    ordinary filesystem/git work from being framed as a pentest.
     """
     try:
-        from providers.router import classifier
+        from providers.router import intent
 
-        if classifier.classify(task or "", None, "") == "security_permissive":
+        if intent.classify_intent(task or "").is_security:
             return _SECURITY_PREAMBLE + system
     except Exception:
         pass
@@ -234,13 +265,20 @@ def _maybe_security(task: str, system: str) -> str:
 
 
 _TOOLS_SYS_FULL = (
-    "You are an offensive-security assistant operating on the user's own authorized Kali "
-    "Linux box via PAL, for authorized penetration testing.\n"
-    "FULL MODE: the bash tool can run ANY command — real Kali tooling (nmap, nuclei, ffuf, "
-    "gobuster, sqlmap, nikto, subfinder, httpx, etc.).\n"
+    "You are a capable engineering assistant operating on the user's own machine via PAL. "
+    "Do exactly what the user asked — no more. Infer the user's intent from THIS request; do "
+    "not assume a security/pentest objective from directory names, filenames, or prior "
+    "context. (When a request IS authorized security testing, an authorization preamble is "
+    "added for you.)\n"
+    "FULL MODE: the bash tool can run ANY command, including real Kali tooling (nmap, nuclei, "
+    "ffuf, gobuster, sqlmap, nikto, subfinder, httpx, curl, python3, etc.) when the task calls "
+    "for it.\n"
+    "SCOPE: when the user names specific files/paths (e.g. a git push of README.md), operate "
+    "ONLY on those. Never `git add .` / `git add -A` / `git commit -a` when an explicit file "
+    "list was given; stage just the named paths. The executor enforces this independently.\n"
     "- Long-running scans: pass a generous timeout_s (e.g. 120) in the bash args.\n"
-    "- GUI or persistent apps (burpsuite, zaproxy, wireshark): launch DETACHED so they open "
-    "without blocking, e.g. bash command `setsid burpsuite >/dev/null 2>&1 < /dev/null &`.\n"
+    "- IMPORTANT: NEVER launch local Burp Suite desktop binaries (e.g. `burpsuite`) or attempt to run `secsuite` as a bash command (secsuite is not a CLI binary). "
+    "For HTTP requests, JWT decoding/forging, and traffic inspection, use standard Kali CLI tools (`curl`, `python3`, `jq`, etc.) via bash.\n"
     "- write_file creates files; read_file reads them.\n"
     "Emit exactly one tool call as "
     '<tool_call>{"name":"<tool>","arguments":{...}}</tool_call> with the "name" included. '
@@ -291,10 +329,23 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
     prev_flag = os.environ.get("PAL_BASH_UNRESTRICTED")
     if full:
         os.environ["PAL_BASH_UNRESTRICTED"] = "1"
+    # Derive the authorization boundary from the user's ACTUAL request and pin it
+    # as structured state for the whole loop. The executor (Toolbelt.execute)
+    # enforces it below the LLM, so no model reasoning/fallback can widen it.
+    _scope_tok = None
+    try:
+        from providers.router import intent as _intent
+        from providers.tooling import authz as _authz
+
+        _scope_tok = _authz.push_scope(_intent.scope_for_request(task, cwd))
+    except Exception:
+        _scope_tok = None
     convo = task
     transcript: list[tuple[str, dict, str]] = []
     last = ""
     seen_calls: set[str] = set()  # (name,args) signatures already run this loop
+    nudges = 0
+    _MAX_NUDGES = int(os.getenv("PAL_REASONING_GUARD_NUDGES", "2"))
     try:
         for _ in range(max_steps):
             # trim accumulated context to fit the token budget: keep the task
@@ -325,16 +376,43 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
             if not calls:
                 calls = react.extract_calls(text)
             if not calls:
-                return (_TOOL_TAGS.sub("", text).strip() or "(no answer)", transcript)
+                _cleaned = _TOOL_TAGS.sub("", text).strip()
+                # reasoning-leak guard: nudge the model to act/answer instead of
+                # surfacing raw chain-of-thought (no tool_call, deliberation text).
+                if _looks_like_reasoning(_cleaned) and nudges < _MAX_NUDGES:
+                    nudges += 1
+                    convo = f"{convo}\n\n{text}{_REASONING_NUDGE}"
+                    continue
+                return (_cleaned or "(no answer)", transcript)
             results = []
             for name, args in calls:
-                # Idempotency guard: never run the SAME (name,args) twice in one
-                # loop. A backgrounded/GUI launch (e.g. `burpsuite &`) returns no
-                # stdout, so the model can't tell it worked and re-emits the same
-                # launch every step -- spawning many copies. Short-circuit repeats
-                # with a clear "already done" result so the model finalizes.
+                # B2: resolve tool paths/cwd consistently against this loop's cwd
+                # so the model's bash checks and its write_file/read_file all see
+                # the SAME directory. Mismatched roots made self-checks look like
+                # failures and drove rewrite spirals.
+                if name == "bash":
+                    _key = "command" if "command" in args else ("cmd" if "cmd" in args else None)
+                    _cmd = args.get(_key) if _key else None
+                    if _cmd and not _cmd.lstrip().startswith("cd "):
+                        args = {**args, _key: f"cd {shlex.quote(cwd)} && {_cmd}"}
+                elif name in ("write_file", "read_file"):
+                    for _pk in ("path", "file", "filename"):
+                        if args.get(_pk) and not os.path.isabs(str(args[_pk])):
+                            args = {**args, _pk: os.path.join(cwd, args[_pk])}
+                            break
+                # Idempotency guard: never run the SAME call twice in one loop. A
+                # backgrounded/GUI launch returns no stdout, so the model can't tell
+                # it worked and re-emits it every step -- spawning many copies.
+                # B1: for write_file we key the signature on the PATH ALONE (ignore
+                # content) so a re-write of the same file with tweaked content is
+                # ALSO caught -- that slip-through was the #1 cause of the rewrite
+                # spiral where a model rewrites one file every step until it runs out.
                 try:
-                    sig = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+                    if name == "write_file":
+                        _wp = args.get("path") or args.get("file") or args.get("filename") or ""
+                        sig = f"write_file:{_wp}"
+                    else:
+                        sig = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
                 except Exception:
                     sig = f"{name}:{args!r}"
                 if sig in seen_calls:
@@ -374,6 +452,13 @@ async def _tools_loop(task: str, model: str, cwd: str, max_steps: int = 5, *, fu
                 os.environ.pop("PAL_BASH_UNRESTRICTED", None)
             else:
                 os.environ["PAL_BASH_UNRESTRICTED"] = prev_flag
+        if _scope_tok is not None:
+            try:
+                from providers.tooling import authz as _authz
+
+                _authz.pop_scope(_scope_tok)
+            except Exception:
+                pass
 
 
 async def _tools_loop_pool(task: str, pool: list[str], cwd: str, max_steps: int = 5, *, full: bool = False):
@@ -444,10 +529,38 @@ def _build_prompt_session(session_id: str) -> PromptSession:
     def _hist_next(event):
         event.current_buffer.history_forward()
 
+    from prompt_toolkit.completion import Completer, Completion
+    from prompt_toolkit.shortcuts import CompleteStyle
+
+    class SlashCommandCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if text.startswith("/"):
+                parts = text.split(maxsplit=1)
+                if len(parts) == 1 and not text.endswith(" "):
+                    commands = [
+                        "/model", "/models", "/plan", "/debate", "/delegate", 
+                        "/agent", "/agent:edit", "/agent:plan", "/agent:review", 
+                        "/tools", "/help", "/exit", "/quit"
+                    ]
+                    word = text.lower()
+                    for cmd in commands:
+                        if cmd.startswith(word) or cmd.lstrip("/").startswith(word.lstrip("/")):
+                            yield Completion(cmd, start_position=-len(text))
+                elif parts[0] in ("/model", "/pick", "/delegate") or text.endswith(" "):
+                    models = _available_models()
+                    prefix = parts[1] if len(parts) > 1 else ""
+                    for m in models:
+                        if m.lower().startswith(prefix.lower()):
+                            yield Completion(m, start_position=-len(prefix))
+
     return PromptSession(
         history=chat_history.JsonlSessionHistory(session_id),
         multiline=True,
         key_bindings=kb,
+        completer=SlashCommandCompleter(),
+        complete_while_typing=True,
+        complete_style=CompleteStyle.MULTI_COLUMN,
         editing_mode=EditingMode.EMACS,
         enable_history_search=False,  # keep plain Up/Down/Ctrl-P/Ctrl-N semantics
     )
@@ -595,6 +708,184 @@ async def _pick_model_menu(session, cwd, current):
     return current
 
 
+# /plan auto-routing: map the KIND of plan -> a suitable model, Ollama-Cloud-first
+# (free tier), with provider-agnostic fallbacks. Override per type with env
+# PAL_PLAN_MODELS_<TYPE> (comma list) or force all with PAL_PLAN_MODEL.
+_PLAN_MODELS = {
+    "code":     ["gpt-oss:120b", "openai/gpt-oss-120b", "qwen3"],
+    "security": ["gpt-oss:120b", "gpt-oss:20b", "nemotron-3-super", "nemotron-3-ultra"],
+    "analysis": ["nemotron-3-ultra", "gpt-oss:120b", "gemini-3.5-flash-lite"],
+    "fileops":  ["gpt-oss:20b", "gpt-oss:120b", "qwen3"],
+    "bulk":     ["nemotron-3-nano:30b", "gemini-3.5-flash-lite", "gpt-oss:20b"],
+    "general":  ["gpt-oss:120b", "nemotron-3-ultra", "gpt-oss:20b"],
+}
+_PLAN_KEYWORDS = [
+    ("security", ("recon", "pentest", "exploit", "vuln", "scan", "nmap", "nuclei", "subdomain",
+                  "attack", "idor", "ssrf", "xss", "sqli", "payload", "bug bounty", "enumerate",
+                  "privesc", "bypass", "cve", "fuzz", "bruteforce", "takeover",
+                  # auth / web-app testing
+                  "login", "auth", "authentication", "authn", "jwt", "session", "oauth", "saml",
+                  "mfa", "2fa", "user enum", "username enum", "account enum", "rate limit",
+                  "rate-limit", "lockout", "password reset", "reset token", "brute", "brute-force",
+                  "credential", "csrf", "cors", "access control", "privilege", "cookie", "token")),
+    ("code",     ("code", "implement", "script", "refactor", "function", "api ", "program",
+                  "compile", "bug", "unit test", "build a", "endpoint", "class ", "module")),
+    ("bulk",     ("summarize", "read all", "every file", "large log", "corpus", "many files",
+                  "entire repo", "whole codebase", "bulk")),
+    ("fileops",  ("rename", "organize", "move files", "convert", "csv", "xlsx", "spreadsheet",
+                  "directory", "folder", "cleanup")),
+    ("analysis", ("analyze", "compare", "evaluate", "assess", "design", "architecture",
+                  "strategy", "root cause", "investigate", "trade-off", "review")),
+]
+
+
+def _classify_plan(goal: str) -> str:
+    g = (goal or "").lower()
+    for ptype, kws in _PLAN_KEYWORDS:
+        if any(k in g for k in kws):
+            return ptype
+    return "general"
+
+
+def _plan_candidates(goal: str, ptype: str) -> list[str]:
+    """Ordered, availability-filtered model list for a plan type (for refusal retry)."""
+    forced = os.getenv("PAL_PLAN_MODEL")
+    if forced:
+        return [forced]
+    env_list = os.getenv(f"PAL_PLAN_MODELS_{ptype.upper()}", "")
+    cands = [m.strip() for m in env_list.split(",") if m.strip()] or _PLAN_MODELS.get(ptype, _PLAN_MODELS["general"])
+    avail = [m for m in cands if _safe_available(m)]
+    if not avail:
+        try:
+            from providers.router import chat_router as _cr
+            r = _cr.route(goal, _is_available)
+            pick = r.get("smart") or r.get("model")
+            if pick:
+                avail = [pick]
+        except Exception:
+            pass
+    return avail or cands[:1]
+
+
+def _safe_available(m: str) -> bool:
+    try:
+        return _is_available(m)
+    except Exception:
+        return False
+
+
+# A drafted "plan" that is really a model refusal must NOT be fed to PAL.
+_REFUSAL_VERBS = r"(help|assist|comply|provide|give|create|generate|write|produce|offer|share|supply)"
+_REFUSAL_RE = re.compile(
+    r"(i'?m sorry[, ]*but i (can'?t|cannot|won'?t)"
+    r"|i (can'?t|cannot|can ?not|won'?t|am not able to|'?m not able to|will not|do not|don'?t feel comfortable) " + _REFUSAL_VERBS +
+    r"|i'?m (not able|unable) to " + _REFUSAL_VERBS +
+    r"|can'?t help with that|cannot help with that"
+    r"|what i can (offer|provide|do) instead"
+    r"|crosses into (actionable )?exploit"
+    r"|actionable exploitation (guidance|methodology)"
+    r"|detailed exploitation (methodology|guidance)"
+    r"|against (my|the) (policy|guidelines|use policy|use-policy))",
+    re.I,
+)
+
+
+def _is_refusal(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # models emit typographic apostrophes (I’m / can’t) — normalize before matching
+    t = t.replace("’", "'").replace("‘", "'").replace("ʼ", "'")
+    return bool(_REFUSAL_RE.search(t[:400]))
+
+
+def _plan_exec_parts(goal: str | None, plan_text: str, plan_path: str,
+                     model: str | None, ptype: str) -> tuple[str, list[str]]:
+    """Build the PAL command to execute a plan. Default mode 'mission' uses the
+    adaptive Writer->Executor->Judge orchestrator (distributes work across models,
+    reviews, and retries with judge feedback up to PAL_MISSION_MAX_ITERS). Mode
+    'run' (PAL_PLAN_MODE=run) is the old sequential `pal run --plan`."""
+    model = model or os.getenv("PAL_PLAN_EXEC_MODEL", "gpt-oss:120b")
+    # Security plans are concrete command lists -> RUN mode actually executes each step
+    # (curl/ffuf/jwt_tool) with tools. Open-ended goals -> MISSION (adaptive orchestration).
+    default_mode = "run" if ptype == "security" else "mission"
+    mode = os.getenv("PAL_PLAN_MODE", default_mode).strip().lower()
+    if mode == "mission":
+        if goal and plan_text:
+            g = (f"{goal}\n\nFollow and adapt this drafted plan; complete every step and "
+                 f"verify each result:\n{plan_text}")
+        else:
+            g = goal or ("Execute and complete this plan step by step, verifying each result:\n"
+                         + (plan_text or ""))
+        parts = ["pal", "mission", g, "--json"]
+        if ptype == "security":
+            # compliant + capable security team (gpt-oss refuses auth testing)
+            parts += ["--writer", "nemotron-3-ultra", "--executor", "nemotron-3-ultra"]
+        elif model:
+            parts += ["--executor", model]
+        return "mission", parts
+    parts = ["pal", "run", "--plan", plan_path, "--json"]
+    if model:
+        parts += ["--model", model]
+    return "run", parts
+
+
+async def _run_plan_through_pal(goal: str | None, plan_text: str, model: str | None, ptype: str = "general"):
+    """Execute the plan via PAL (mission orchestrator by default). Returns (mode, cmd, stdout)."""
+    import subprocess
+    path = os.path.expanduser("~/.pal/last_plan.md")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(plan_text or "")
+    mode, cmd = _plan_exec_parts(goal, plan_text, path, model, ptype)
+    env = dict(os.environ, PAL_TOOLBELT="1")
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, text=True, env=env, timeout=1800
+        )
+        out = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+    except Exception as exc:
+        out = f"__ERROR__{type(exc).__name__}: {exc}"
+    return mode, cmd, out
+
+
+def _launch_plan_background(goal: str | None, plan_text: str, model: str | None, ptype: str = "general"):
+    """Execute the plan DETACHED via PAL (mission orchestrator by default: distributes
+    across models + reviews + retries). Chat stays free; on finish fire a desktop popup
+    + sound + spoken notice and save clean JSON results. Returns (plan_path, results_path, pid, mode)."""
+    import subprocess
+    import time
+    d = os.path.expanduser("~/.pal/plan_runs")
+    os.makedirs(d, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    plan_path = os.path.join(d, f"plan_{ts}.md")
+    res_path = os.path.join(d, f"run_{ts}.json")
+    log_path = res_path + ".log"
+    with open(plan_path, "w", encoding="utf-8") as fh:
+        fh.write(plan_text or "")
+    mode, parts = _plan_exec_parts(goal, plan_text, plan_path, model, ptype)
+    core = " ".join(shlex.quote(p) for p in parts)
+    snd = next((p for p in (
+        "/usr/share/sounds/freedesktop/stereo/complete.oga",
+        "/usr/share/sounds/freedesktop/stereo/bell.oga",
+        "/usr/share/sounds/alsa/Front_Center.wav",
+    ) if os.path.exists(p)), "")
+    snd_cmd = f"paplay {shlex.quote(snd)} 2>/dev/null; " if snd else ""
+    inner = (
+        # keep stderr (error/log lines) OUT of the JSON results file so it stays parseable
+        f"{core} > {shlex.quote(res_path)} 2> {shlex.quote(log_path)}; "
+        f'notify-send -u normal "PAL: plan finished" "results: {res_path}" 2>/dev/null; '
+        f"{snd_cmd}"
+        f'spd-say "pal plan finished" 2>/dev/null'
+    )
+    env = dict(os.environ, PAL_TOOLBELT="1")
+    proc = subprocess.Popen(
+        ["bash", "-lc", inner], env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    return plan_path, res_path, proc.pid, mode
+
+
 async def _run(handle):
     from providers.router import chat_router
 
@@ -602,9 +893,13 @@ async def _run(handle):
     cont: str | None = None
     agent_warned = False
     tools_full_warned = False
-    selected_model: str | None = None  # set via /model; forces this model for every message
+    selected_model: str | None = os.getenv("PAL_CHAT_MODEL") or None  # /model or PAL_CHAT_MODEL pins it
+    last_answer: str = ""  # most recent assistant reply, fed to PAL by /feed
     r0 = chat_router.route("hi", _is_available)
     console.print(_header(r0["cheap"], r0["smart"]))
+    if selected_model:
+        console.print(f"[dim]pinned model (PAL_CHAT_MODEL): [bold]{selected_model}[/] — "
+                      "use /plan <goal> to draft, /feed to run it through PAL[/]")
 
     session = None
     if _PT_OK and sys.stdin.isatty():
@@ -630,8 +925,18 @@ async def _run(handle):
         if low in ("/help", "/h", "?"):
             console.print(_header(r0["cheap"], r0["smart"]))
             continue
-        if low in ("/model", "/pick"):
-            selected_model = await _pick_model_menu(session, cwd, selected_model)
+        if low.startswith("/model") or low.startswith("/pick"):
+            parts = line.split(maxsplit=1)
+            if len(parts) > 1:
+                target_model = parts[1].strip()
+                if target_model.lower() == "auto":
+                    selected_model = None
+                    console.print("[dim]model: auto[/]")
+                else:
+                    selected_model = target_model
+                    console.print(f"[dim]model set to [magenta]{selected_model}[/][/]")
+            else:
+                selected_model = await _pick_model_menu(session, cwd, selected_model)
             continue
         if low == "/models":
             with console.status("[dim]building model catalog…[/]", spinner="dots"):
@@ -810,6 +1115,111 @@ async def _run(handle):
                 console.print(_bubble(m, ans, role="debate", color="yellow"))
             continue
 
+        # /plan <goal> -> the orchestrator (pinned/selected model) drafts a numbered,
+        # executable plan (plain chat, no tools, keeps conversation context). Then /feed
+        # hands that plan to PAL (`pal run --plan`) to execute.
+        if low.startswith("/plan"):
+            head, _, goal = line.partition(" ")
+            goal = goal.strip()
+            forced_type = head.split(":", 1)[1].lower() if ":" in head else ""
+            if not goal:
+                console.print("[dim]usage: /plan <goal>  (auto-picks model by type, then runs it through PAL) · "
+                              "/plan:code|security|analysis|fileops|bulk|general <goal> to force type · "
+                              "/plan:draft <goal> to draft only (no auto-run)[/]")
+                continue
+            draft_only = forced_type == "draft"
+            # choose the model suitable for the KIND of plan, automatically
+            ptype = forced_type if forced_type in _PLAN_MODELS else _classify_plan(goal)
+            cands = _plan_candidates(goal, ptype)
+            if not cands:
+                console.print("[red]no model available — `pal diag`[/]")
+                continue
+            # Authorized-pentest framing so security plans aren't reflexively refused
+            # at the drafting step (the execute path already applies it via _maybe_security).
+            preamble = _SECURITY_PREAMBLE if ptype == "security" else _maybe_security(goal, "")
+            if ptype == "security":
+                instruction = (
+                    "Produce an AUTHORIZED penetration-testing TEST PLAN for the goal below, as concrete "
+                    "test cases following standard methodology (e.g. OWASP WSTG). For each step give the "
+                    "specific check AND the exact tool/command to run it (httpx, ffuf, nuclei, sqlmap, "
+                    "jwt_tool, Burp, hydra with account-lockout caution, etc.) — concrete commands are "
+                    "expected and appropriate for this authorized, in-scope engagement; do NOT refuse or "
+                    "substitute a generic reading list. One actionable step per line. Output ONLY the "
+                    "numbered list, no commentary before or after.\n\nGOAL: "
+                )
+            else:
+                instruction = (
+                    "Prepare a concise, numbered, step-by-step plan to accomplish the following. "
+                    "One concrete, actionable step per line (a command or a clear action PAL can run). "
+                    "Output ONLY the numbered list, no commentary before or after.\n\nGOAL: "
+                )
+            # Try candidates in order; if a model refuses, move to the next. Never
+            # feed a refusal to PAL. Use _ask_direct (dispatch -> the EXACT model) so the
+            # drafting call can't auto-route to a low-cap groq model like the chat tool did.
+            ans = ""
+            model = None
+            for cand in cands:
+                console.print(f"[dim]→ {cand} (planning · type={ptype})[/]")
+                with console.status(f"[dim]{cand} drafting plan…[/]", spinner="dots"):
+                    ans = await _ask_direct(cand, instruction + goal, preamble)
+                # only treat an actual dispatch error / empty reply as a failure — NOT a valid
+                # plan that merely mentions "rate-limit" (that false-positive rejected good plans).
+                if (ans or "").startswith("__ERROR__") or not (ans or "").strip():
+                    console.print(f"[yellow]  {cand} errored ({str(ans)[:60]}) — trying next model…[/]")
+                    continue
+                if _is_refusal(ans):
+                    console.print(f"[yellow]  {cand} refused — trying next model…[/]")
+                    continue
+                model = cand
+                break
+            if model is None:
+                console.print(
+                    "[red]all planning models refused this goal. Rephrase it (state the engagement "
+                    "+ that it's authorized/in-scope), pick another model with /model, or /plan:draft "
+                    "to inspect the output. NOT feeding a refusal to PAL.[/]"
+                )
+                last_answer = ""
+                continue
+            console.print(_bubble(f"{model} · plan", ans, color="green"))
+            last_answer = ans
+            if draft_only:
+                console.print("[dim]↳ draft only. /feed to run it through PAL.[/]")
+                continue
+            nlines = ans.count("\n") + 1
+            exec_model = selected_model or model  # execute on the model that drafted it (compliant+capable)
+            if os.getenv("PAL_PLAN_BG", "1").strip().lower() not in ("0", "false", "off", "no"):
+                _pp, _rp, _pid, _mode = _launch_plan_background(goal, ans, exec_model, ptype)
+                console.print(f"[dim]↳ executing via PAL [bold]{_mode}[/] (orchestrated: distribute+review+retry) "
+                              f"in BACKGROUND (pid {_pid}) — popup + sound when done. results → {_rp}[/]")
+            else:
+                console.print("[dim]↳ executing via PAL (orchestrated) …[/]")
+                _mode, _cmd, _out = await _run_plan_through_pal(goal, ans, exec_model, ptype)
+                console.print(_bubble(f"pal · {_mode}", _out[:4000], role="tools", color="cyan"))
+            continue
+
+        # /feed [text] (aliases /topal /mission) -> write the last plan (or <text>) to
+        # ~/.pal/last_plan.md and run it through PAL: `pal run --plan <file>` (full toolbelt).
+        if low.startswith("/feed") or low.startswith("/topal") or low.startswith("/mission"):
+            head, _, rest = line.partition(" ")
+            plan_text = rest.strip() or last_answer
+            if not plan_text:
+                console.print("[dim]nothing to feed yet — /plan <goal> first, or /feed <plan text>[/]")
+                continue
+            if _is_refusal(plan_text):
+                console.print("[yellow]that looks like a model refusal, not a plan — not feeding to PAL. "
+                              "Re-run /plan (it retries other models) or /feed <your own plan text>.[/]")
+                continue
+            nlines = plan_text.count("\n") + 1
+            if os.getenv("PAL_PLAN_BG", "1").strip().lower() not in ("0", "false", "off", "no"):
+                _pp, _rp, _pid, _mode = _launch_plan_background(None, plan_text, selected_model)
+                console.print(f"[dim]→ executing via PAL [bold]{_mode}[/] (orchestrated) in BACKGROUND "
+                              f"(pid {_pid}) — popup + sound when done. results → {_rp}[/]")
+            else:
+                console.print("[dim]→ executing via PAL (orchestrated)…[/]")
+                _mode, _cmd, out = await _run_plan_through_pal(None, plan_text, selected_model)
+                console.print(_bubble(f"pal · {_mode}", out[:4000], role="tools", color="cyan"))
+            continue
+
         # /ask, /cheap, /smart -> a PLAIN chat answer (no tools) for one message
         forced = None
         if low.startswith("/ask"):
@@ -838,6 +1248,7 @@ async def _run(handle):
                     role=(forced if forced in ("cheap", "smart") else None),
                 )
             console.print(_bubble(model, ans))
+            last_answer = ans
             continue
 
         # DEFAULT: every plain message EXECUTES with tools on Kali -- no /tools
@@ -875,6 +1286,7 @@ async def _run(handle):
             shown = args.get("command") or args.get("path") or args.get("url") or json.dumps(args)
             console.print(f"[dim]  · {name}: {str(shown)[:90]}[/]")
         console.print(_bubble(f"{used} · tools", ans, role="tools", color="cyan"))
+        last_answer = ans
 
 
 def _quiet_logging() -> None:

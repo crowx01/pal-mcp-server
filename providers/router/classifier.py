@@ -62,7 +62,19 @@ def classify(prompt: str, files: list[str] | None = None, tool_default: str = ""
         return tool_default
     text = prompt or ""
     if _SEC_RE.search(text):
-        return "security_permissive"
+        # A security keyword appearing only as the OBJECT of a filesystem/git
+        # verb ("commit exploit.py", "mkdir enumeration") is NOT a security
+        # task — do not route it to the permissive security model.
+        try:
+            from providers.router import intent as _intent
+
+            it = _intent.classify_intent(text)
+            if it.kind in ("git", "fileops") and not it.is_security:
+                pass  # fall through to the non-security signals below
+            else:
+                return "security_permissive"
+        except Exception:
+            return "security_permissive"
     if _files_byte_total(files) > LONG_CTX_THRESHOLD:
         return "long_context_bulk"
     if _STRUCT_RE.search(text):
@@ -75,8 +87,8 @@ def classify(prompt: str, files: list[str] | None = None, tool_default: str = ""
 # Preferred model per PAL classifier category. Order is intent; the router
 # picks the first entry available with a keyed provider (and not blacklisted).
 CATEGORY_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "security_permissive": ("grok-4-fast", "grok", "openrouter/x-ai/grok-4-fast", "or-free", "gemini-3-pro-preview"),
-    "long_context_bulk": ("nvidia/nemotron-nano-9b-v2", "or-free", "gemini-3-pro-preview"),
-    "structured_extract": ("gemini-3.6-flash", "flash", "gpt-oss-120b", "or-free"),
-    "long_form_prose": ("gpt-oss-120b", "openai/gpt-oss-120b", "gemini-3-pro-preview"),
+    "security_permissive": ("gpt-oss-120b", "openai/gpt-oss-120b", "nemotron-3-nano:30b", "openrouter/free", "grok-4-fast"),
+    "long_context_bulk": ("nemotron-3-nano:30b", "openrouter/free", "flash-lite", "gemini-3.5-flash-lite"),
+    "structured_extract": ("gemini-3.5-flash-lite", "flash-lite", "qwen3", "openrouter/free"),
+    "long_form_prose": ("gpt-oss-120b", "openai/gpt-oss-120b", "command-r-08-2024", "gemini-3.5-flash-lite"),
 }
